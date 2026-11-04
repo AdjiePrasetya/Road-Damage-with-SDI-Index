@@ -1,0 +1,214 @@
+# ==============================================================================
+# KONFIGURASI DASHBOARD SURVEY KONDISI JALAN - METODE SDI (PKRMS MANUAL 04/M/BM/2021)
+# ==============================================================================
+
+app:
+  title: "Dashboard Survei SDI - PKRMS Bina Marga"
+  subtitle: "Sistem Evaluasi Kondisi Perkerasan Jalan Berdasarkan Surface Distress Index"
+  reference: "SE Dirjen Bina Marga No. 22/SE/Db/2021 (Manual No. 04/M/BM/2021 Bab 4.2.5)"
+
+# ------------------------------------------------------------------------------
+# 1. PATH MODEL & SPESIFIKASI INFERENSI
+# ------------------------------------------------------------------------------
+models:
+  # Model Deteksi Kerusakan Jalan (RDD2022)
+  road_damage:
+    # Model terbaik hasil training pada folder runs
+    primary_path: "road_damage_models/runs/detect/rdd_baseline/run1/weights/best.pt"
+    # Fallback jika model training tidak ditemukan
+    fallback_path: "road_damage_models/weights/yolo26n.pt"
+    confidence_threshold: 0.25
+    iou_threshold: 0.45
+    imgsz: 640
+    device: "cpu" # 'cpu' atau '0' (GPU CUDA jika tersedia)
+
+  # Model Klasifikasi Jenis Perkerasan
+  perkerasan_clf:
+    # Model terbaik hasil training klasifikasi 5 kelas
+    primary_path: "perkerasan_clf_models/runs/perkerasan_cls/weights/best.pt"
+    # Fallback jika model training tidak ditemukan
+    fallback_path: "perkerasan_clf_models/weights/yolo26n.pt"
+    confidence_threshold: 0.30
+    imgsz: 320
+    device: "cpu"
+
+  # Model Estimasi STA / GPS
+  gps_sta:
+    # Mode estimasi STA:
+    # - "speed_time"   : Menggunakan kecepatan konstan kendaraan survei (STA = STA_awal + waktu * v)
+    # - "ocr_overlay"  : Membaca teks koordinat / STA yang tercetak (overlay) pada frame video
+    # - "custom_yolo"  : Model YOLO deteksi khusus jika user memiliki bobot patok/angka
+    mode: "speed_time"
+    default_speed_kmh: 30.0 # Kecepatan survei tipikal (30 km/jam = 8.33 m/s)
+    # TODO (USER): Jika menggunakan OCR overlay pada video dashcam, tentukan area koordinat teks [ymin, xmin, ymax, xmax] normalisasi 0-1
+    ocr_crop_box: [0.85, 0.0, 1.0, 0.50]
+    # Path model custom jika ada:
+    custom_model_path: "gps_sta_model/weights/yolo26n.pt"
+
+# ------------------------------------------------------------------------------
+# 2. MAPPING KELAS MODEL KE KATEGORI SDI
+# ------------------------------------------------------------------------------
+# TODO (USER): Periksa apakah mapping kelas berikut sudah sesuai dengan label dataset Anda.
+class_mapping:
+  # Pemetaan kelas deteksi kerusakan (RDD 2022) ke kategori SDI (crack, pothole, rutting, other)
+  road_damage:
+    "longitudinal crack": "crack"      # D00 - Retak Memanjang
+    "transverse crack": "crack"        # D10 - Retak Melintang
+    "alligator crack": "crack"         # D20 - Retak Buaya
+    "other corruption": "other"        # D40 - Kerusakan lain (tidak masuk SDI inti)
+    "Pothole": "pothole"               # D40 / Lubang
+
+  # Pemetaan kelas klasifikasi perkerasan ke tipe standar PKRMS
+  perkerasan:
+    "hotmix": "Hotmix"                 # Aspal beton (Flexible pavement)
+    "lapen": "Lapen"                   # Lapis penetrasi makadam (Aspal)
+    "perkerasan_beton": "Beton"        # Rigid pavement (Semen/Kaku)
+    "kerikil": "Kerikil"               # Unpaved / sirtu
+    "tanah_belum_tembus": "Tanah"      # Unpaved / tanah dasar
+
+# ------------------------------------------------------------------------------
+# 3. ATURAN PERHITUNGAN SDI (SE Dirjen Bina Marga No. 22/SE/Db/2021 Tabel 9)
+# ------------------------------------------------------------------------------
+sdi_table_9:
+  # Level 1: Luas Kerusakan Retak (% terhadap luas segmen = panjang x lebar)
+  crack_area:
+    none:
+      max_pct: 0.0
+      sdi: 0
+    low:
+      min_pct: 0.0
+      max_pct: 10.0
+      sdi: 5
+    medium:
+      min_pct: 10.0
+      max_pct: 30.0
+      sdi: 20
+    high:
+      min_pct: 30.0
+      sdi: 40
+
+  # Level 2: Rata-rata Lebar Retak (mm)
+  crack_width:
+    # Nilai ambang batas pemantik pengali x 2.
+    # CATATAN: Tabel 9 Manual PKRMS menetapkan '> 3 mm', sedangkan narasi pada teks manual
+    # halaman 38 menyebutkan '> 5 mm'. Default di sini adalah 3.0 mm sesuai Tabel 9.
+    threshold_mm: 3.0
+    multiplier: 2.0
+
+  # Level 3: Jumlah Lubang per km (skala: jumlah_lubang_segmen * 1000 / panjang_segmen_m)
+  potholes_per_km:
+    none:
+      count: 0
+      add_sdi: 0
+    low:
+      max_count: 10.0
+      add_sdi: 15
+    medium:
+      min_count: 10.0
+      max_count: 50.0
+      add_sdi: 75
+    high:
+      min_count: 50.0
+      add_sdi: 225
+
+  # Level 4: Rata-rata Kedalaman Alur / Rutting Bekas Roda (cm)
+  # Input manual / sensor 3D karena video 2D tidak mengukur elevasi secara langsung
+  rutting_depth_cm:
+    none:
+      depth: 0.0
+      add_sdi: 0
+    low:
+      max_depth: 1.0
+      add_sdi: 2.5
+    medium:
+      min_depth: 1.0
+      max_depth: 3.0
+      add_sdi: 10.0
+    high:
+      min_depth: 3.0
+      add_sdi: 20.0
+
+# ------------------------------------------------------------------------------
+# 4. KLASIFIKASI KONDISI JALAN (Tabel 10 Manual PKRMS)
+# ------------------------------------------------------------------------------
+sdi_table_10:
+  good:
+    max_sdi: 50.0
+    label: "Baik"
+    color: "#2ECC71"       # Hijau
+    badge: "success"
+  fair:
+    min_sdi: 50.0
+    max_sdi: 100.0
+    label: "Sedang"
+    color: "#F1C40F"       # Kuning
+    badge: "warning"
+  poor:
+    min_sdi: 100.0
+    max_sdi: 150.0
+    label: "Rusak Ringan"
+    color: "#E67E22"       # Oranye
+    badge: "danger"
+  bad:
+    min_sdi: 150.0
+    label: "Rusak Berat"
+    color: "#E74C3C"       # Merah
+    badge: "dark"
+
+# ------------------------------------------------------------------------------
+# 5. REKOMENDASI PENANGANAN (Default Standar Bina Marga)
+# ------------------------------------------------------------------------------
+recommendations:
+  # Penanganan Jalan Beraspal (Hotmix / Lapen)
+  aspal:
+    "Baik": "Pemeliharaan rutin (pembersihan drainase, tambal kecil, pemeliharaan bahu)"
+    "Sedang": "Pemeliharaan rutin intensif / pemeliharaan berkala ringan (tambal retak, crack sealing, fog seal / laburan aspal)"
+    "Rusak Ringan": "Pemeliharaan berkala (patching lubang + overlay / lapis ulang tipis)"
+    "Rusak Berat": "Rehabilitasi / peningkatan struktur (overlay tebal, perbaikan struktur, rekonstruksi setempat)"
+
+  # Penanganan Jalan Beton / Semen (Kaku)
+  # CATATAN: Manual SDI PKRMS dirancang baku untuk perkerasan beraspal. Untuk beton rekomendasi bersifat indikatif teknis.
+  beton:
+    "Baik": "Pemeliharaan rutin (pembersihan sambungan / joint & saluran samping)"
+    "Sedang": "Perbaikan sambungan pelat (joint resealing) & penutupan retak rambut (crack sealing)"
+    "Rusak Ringan": "Penambalan kedalaman parsial (partial depth repair), penjahitan retak (cross stitching), & injeksi semen/grouting"
+    "Rusak Berat": "Penggantian pelat beton penuh (full-depth slab replacement) & stabilisasi tanah dasar"
+
+  # Penanganan Jalan Kerikil / Tanah
+  unpaved:
+    "Baik": "Perataan permukaan ringan & pembersihan saluran tepi"
+    "Sedang": "Perataan dengan grader (grading) & pemadatan ulang setempat"
+    "Rusak Ringan": "Penambahan material agregat pilihan (regravelling) & perataan jalan"
+    "Rusak Berat": "Peningkatan struktur jalan (pembentukan kembali lapis pondasi / peningkatan ke aspal/beton)"
+
+# ------------------------------------------------------------------------------
+# 6. LOGIKA SEGMENTASI RUAS JALAN
+# ------------------------------------------------------------------------------
+segmentation:
+  base_segment_length_m: 100.0   # Panjang blok segmen dasar survei PKRMS (100 m)
+  min_segment_length_m: 10.0    # Segmen lebih pendek dari 10m akan digabung ke tetangga
+  smoothing_window_size: 5       # Window filter median / majority vote untuk tipe perkerasan
+  min_run_length: 3             # Minimal frame berturut-turut untuk menyatakan perubahan perkerasan valid
+
+# ------------------------------------------------------------------------------
+# 7. PARAMETER KALIBRASI COMPUTER VISION
+# ------------------------------------------------------------------------------
+calibration:
+  # TODO (USER): Tentukan rasio meter per pixel kamera Anda jika diketahui.
+  # Misalnya bila 1 pixel kamera setara dengan 0.005 meter (5 mm).
+  meter_per_pixel: 0.005
+  default_road_width_m: 6.0
+
+  # TODO (USER): Karena model RDD2022 adalah object detection (bounding box),
+  # retak tidak berbentuk persegi pejal. Nilai ini adalah rasio estimasi area retak sebenarnya
+  # terhadap total area bounding box (default 0.20 = 20% area bbox adalah retak nyata).
+  bbox_crack_area_factor: 0.20
+
+  # Asumsi default lebar retak (mm) bila estimasi resolusi bbox/pixel di bawah threshold 3mm:
+  # Dapat disesuaikan di UI sidebar.
+  default_crack_width_mm: 2.0
+
+  # Tracking IoU Threshold untuk deduplikasi objek antar frame berurutan (mencegah double-count)
+  tracking_iou_threshold: 0.30
+  tracking_max_lost_frames: 5
+
