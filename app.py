@@ -3,6 +3,10 @@ Dashboard Survei Kondisi Jalan Berbasis SDI (Surface Distress Index)
 Sesuai Manual PKRMS (SE Dirjen Bina Marga No. 22/SE/Db/2021, Manual No. 04/M/BM/2021 Bab 4.2.5).
 
 Direktorat Jenderal Bina Marga - Kementerian Pekerjaan Umum dan Perumahan Rakyat.
+Fitur:
+- Nama Ruas Jalan Otomatis Diambil dari Nama File Video
+- Estimasi STA & Jarak Mandiri Berbasis Model gps_sta_model (Tanpa OCR)
+- Auto-Calibration Computer Vision & Video Inferensi Lengkap
 """
 import os
 import yaml
@@ -77,6 +81,22 @@ st.markdown("""
         color: #888;
         margin-top: 2px;
     }
+    .auto-badge {
+        background-color: #E8F4FD;
+        border: 1px solid #BEE3F8;
+        border-radius: 6px;
+        padding: 10px 14px;
+        font-size: 12px;
+        color: #2B6CB0;
+        margin-bottom: 15px;
+    }
+    .video-card {
+        background-color: #F8F9FA;
+        border-radius: 8px;
+        padding: 16px;
+        border: 1px solid #E2E8F0;
+        margin-bottom: 20px;
+    }
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
     }
@@ -94,7 +114,6 @@ st.markdown("""
 # ==============================================================================
 @st.cache_data
 def load_config():
-    """Memuat file konfigurasi config.yaml."""
     cfg_path = "config.yaml"
     if os.path.exists(cfg_path):
         with open(cfg_path, "r", encoding="utf-8") as f:
@@ -105,37 +124,25 @@ CONFIG = load_config()
 
 
 @st.cache_resource
-def load_models(
-    conf_thresh: float,
-    meter_per_pixel: float,
-    bbox_crack_area_factor: float,
-    sta_mode: str,
-    default_speed_kmh: float
-):
+def load_models():
     """
-    Memuat model computer vision dengan st.cache_resource agar tidak reload berulang.
+    Memuat model deep learning & adapter dengan st.cache_resource.
+    Ketiga model langsung dimuat dari foldernya masing-masing:
+    1. road_damage_models/
+    2. perkerasan_clf_models/
+    3. gps_sta_model/
     """
     logger.info("Memuat model deep learning & adapter...")
-    
-    # 1. Road Damage Detector
     damage_det = RoadDamageDetector(
-        conf_threshold=conf_thresh,
-        meter_per_pixel=meter_per_pixel,
-        bbox_crack_area_factor=bbox_crack_area_factor,
+        conf_threshold=0.25,
         class_mapping=CONFIG.get("class_mapping", {}).get("road_damage", None)
     )
-
-    # 2. Pavement Classifier
     pave_clf = PavementClassifier(
         class_mapping=CONFIG.get("class_mapping", {}).get("perkerasan", None)
     )
-
-    # 3. STA Estimator
     sta_est = StaEstimator(
-        mode=sta_mode,
-        default_speed_kmh=default_speed_kmh
+        default_speed_kmh=30.0
     )
-
     return damage_det, pave_clf, sta_est
 
 
@@ -146,12 +153,17 @@ if "preview_frames" not in st.session_state:
     st.session_state.preview_frames = []
 if "survey_stats" not in st.session_state:
     st.session_state.survey_stats = {}
+if "annotated_video_path" not in st.session_state:
+    st.session_state.annotated_video_path = None
+if "detected_road_name" not in st.session_state:
+    st.session_state.detected_road_name = "Jalan Ilyas Bedul"
 if "road_info" not in st.session_state:
     st.session_state.road_info = {
-        "road_name": "Ruas Jalan Survei",
-        "sta_start": 0.0,
+        "road_name": "Jalan Ilyas Bedul",
         "road_width_m": 6.0,
-        "direction": "Maju"
+        "base_segment_len": 100.0,
+        "crack_width_thresh": 3.0,
+        "default_rut_depth": 0.0
     }
 
 
@@ -165,23 +177,40 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # ==============================================================================
-# SIDEBAR: PARAMETER & INPUT PENGGUNA
+# SIDEBAR: PENGATURAN SURVEI RINGKAS & OTOMATIS
 # ==============================================================================
 with st.sidebar:
     st.header("⚙️ Pengaturan Survei")
 
+    uploaded_video = st.file_uploader("📹 Upload Video Survei (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
+
+    # EKSTRAKSI OTOMATIS NAMA JALAN DARI FILE VIDEO
+    if uploaded_video is not None:
+        raw_name = os.path.splitext(uploaded_video.name)[0]
+        # Bersihkan karakter underscore atau strip
+        clean_name = raw_name.replace("_", " ").replace("-", " ").strip().title()
+        st.session_state.detected_road_name = clean_name
+
     with st.expander("📌 Identitas Ruas Jalan", expanded=True):
-        road_name = st.text_input("Nama Ruas Jalan", value="Jalan Ilyas Bedul")
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            sta_start = st.number_input("STA Awal (m)", value=0.0, step=10.0)
-        with col_s2:
-            road_width = st.number_input("Lebar Jalan (m)", value=6.0, step=0.5, min_value=1.0)
-        direction = st.selectbox("Arah Survei", ["Maju (Normal)", "Mundur", "Jalur Kiri", "Jalur Kanan"])
+        road_name = st.text_input(
+            "Nama Ruas Jalan",
+            value=st.session_state.detected_road_name,
+            help="Otomatis diambil dari nama file video yang diunggah"
+        )
+        road_width = st.number_input(
+            "Lebar Jalan (m)",
+            value=6.0, step=0.5, min_value=1.0,
+            help="Lebar perkerasan fisik jalan untuk kalkulasi luas retak dan kalibrasi otomatis"
+        )
 
     with st.expander("📏 Parameter Segmentasi & SDI", expanded=True):
-        base_segment_len = st.number_input("Panjang Blok Dasar (m)", value=100.0, step=25.0, min_value=25.0)
+        base_segment_len = st.number_input(
+            "Panjang Blok Dasar (m)",
+            value=100.0, step=25.0, min_value=25.0,
+            help="Panjang standar segmen evaluasi PKRMS (Tabel 9: tiap 100 m)"
+        )
         crack_width_thresh = st.selectbox(
             "Ambang Lebar Retak SDI2 (mm)",
             options=[3.0, 5.0],
@@ -194,20 +223,15 @@ with st.sidebar:
             help="Input manual opsional karena rutting sulit diukur secara akurat dari video 2D."
         )
 
-    with st.expander("🎯 Kalibrasi & Computer Vision", expanded=False):
-        frame_sampling_step = st.slider("Sampling Frame (tiap N frame)", min_value=5, max_value=60, value=15, step=5)
-        conf_threshold = st.slider("Ambang Kepercayaan Deteksi (Confidence)", min_value=0.10, max_value=0.90, value=0.25, step=0.05)
-        meter_per_pixel = st.number_input("Kalibrasi Meter per Pixel", value=0.005, format="%.5f", min_value=0.0001)
-        bbox_area_factor = st.slider(
-            "Faktor Luas Retak dari BBox",
-            min_value=0.05, max_value=1.0, value=0.20, step=0.05,
-            help="Model RDD2022 adalah bounding box. Nilai ini adalah rasio estimasi retak nyata terhadap area box (default 20%)."
-        )
-        sta_mode = st.selectbox("Metode Estimasi STA", ["speed_time", "ocr_overlay"], index=0)
-        survey_speed_kmh = st.number_input("Kecepatan Survei (km/jam)", value=30.0, step=5.0, min_value=5.0)
-
-    st.markdown("---")
-    uploaded_video = st.file_uploader("📹 Upload Video Survei (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
+    # Info Sistem Otomatis
+    st.markdown("""
+    <div class="auto-badge">
+        <strong>⚡ Otomasi Aktif:</strong><br>
+        • Nama ruas jalan otomatis dari nama file video.<br>
+        • Model <code>gps_sta_model/</code> menghitung jarak & panjang mandiri (tanpa OCR).<br>
+        • Kalibrasi kamera & resolusi dihitung otomatis.
+    </div>
+    """, unsafe_allow_html=True)
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -215,46 +239,39 @@ with st.sidebar:
     with col_btn2:
         demo_btn = st.button("🧪 Jalankan Demo", use_container_width=True)
 
-# Simpan info jalan ke state
+# Simpan info ke state
 st.session_state.road_info = {
     "road_name": road_name,
-    "sta_start": sta_start,
     "road_width_m": road_width,
-    "direction": direction,
+    "base_segment_len": base_segment_len,
     "crack_width_thresh": crack_width_thresh,
     "default_rut_depth": default_rut_depth
 }
 
+
 # ==============================================================================
-# LOGIKA AKSI: DEMO MODE & PROSES VIDEO
+# LOGIKA AKSI: PROSES VIDEO & DEMO MODE
 # ==============================================================================
 if demo_btn:
-    with st.spinner("Memuat data demo survei jalan realistis..."):
-        demo_segs, demo_previews, demo_stats = generate_demo_survey_data(
+    with st.spinner("Memuat data demo survei realistis & menyiapkan video inferensi..."):
+        demo_segs, demo_previews, demo_stats, demo_video_path = generate_demo_survey_data(
             road_name=road_name,
-            sta_start=sta_start,
+            sta_start=0.0,
             road_width_m=road_width,
             config=CONFIG
         )
         st.session_state.segments = demo_segs
         st.session_state.preview_frames = demo_previews
         st.session_state.survey_stats = demo_stats
-        st.success("✅ Mode Demo berhasil dimuat! Silakan periksa hasil pada tab di bawah.")
+        st.session_state.annotated_video_path = demo_video_path
+        st.success(f"✅ Mode Demo dimuat untuk {road_name}! Video inferensi siap ditonton dan diunduh.")
 
 if process_btn:
     if uploaded_video is None:
-        st.error("⚠️ Silakan upload video survei terlebih dahulu atau gunakan tombol 'Jalankan Demo'.")
+        st.error("⚠️ Silakan upload file video survei terlebih dahulu atau klik tombol 'Jalankan Demo'.")
     else:
-        # Muat model
-        damage_det, pave_clf, sta_est = load_models(
-            conf_thresh=conf_threshold,
-            meter_per_pixel=meter_per_pixel,
-            bbox_crack_area_factor=bbox_area_factor,
-            sta_mode=sta_mode,
-            default_speed_kmh=survey_speed_kmh
-        )
+        damage_det, pave_clf, sta_est = load_models()
 
-        # Simpan file sementara
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(uploaded_video.read())
         temp_video_path = tfile.name
@@ -268,18 +285,15 @@ if process_btn:
             status_text.text(msg)
 
         try:
-            with st.spinner("Menganalisis video survei dengan Computer Vision & PKRMS..."):
-                segs, previews, stats = process_video_survey(
+            with st.spinner(f"Menganalisis video '{uploaded_video.name}' dengan Model GPS/STA & Kerusakan..."):
+                segs, previews, stats, out_vid_path = process_video_survey(
                     video_path=temp_video_path,
                     damage_detector=damage_det,
                     pavement_classifier=pave_clf,
                     sta_estimator=sta_est,
                     road_name=road_name,
-                    sta_start_m=sta_start,
                     road_width_m=road_width,
                     base_segment_length_m=base_segment_len,
-                    frame_step=frame_sampling_step,
-                    conf_threshold=conf_threshold,
                     crack_width_threshold_mm=crack_width_thresh,
                     default_rut_depth_cm=default_rut_depth,
                     config=CONFIG,
@@ -289,12 +303,12 @@ if process_btn:
                 st.session_state.segments = segs
                 st.session_state.preview_frames = previews
                 st.session_state.survey_stats = stats
-                st.success(f"🎉 Pemrosesan video selesai! Terbentuk {len(segs)} segmen jalan.")
+                st.session_state.annotated_video_path = out_vid_path
+                st.success(f"🎉 Pemrosesan selesai untuk {road_name}! Total panjang jalan terdeteksi: {stats.get('total_length_m', 0):.1f} meter ({len(segs)} segmen).")
         except Exception as e:
             st.error(f"❌ Terjadi kesalahan saat memproses video: {e}")
             logger.exception("Error process_video_survey")
         finally:
-            # Hapus file sementara
             if os.path.exists(temp_video_path):
                 os.remove(temp_video_path)
             progress_bar.empty()
@@ -305,7 +319,7 @@ if process_btn:
 # TAB UTAMA DASHBOARD
 # ==============================================================================
 tab_proses, tab_hasil, tab_vis, tab_peta, tab_koreksi, tab_export = st.tabs([
-    "📸 Proses & Preview",
+    "📸 Video Inferensi & Preview",
     "📋 Hasil SDI (Utama)",
     "📊 Visualisasi & KPI",
     "🗺️ Peta Spasial",
@@ -315,23 +329,60 @@ tab_proses, tab_hasil, tab_vis, tab_peta, tab_koreksi, tab_export = st.tabs([
 
 
 # ------------------------------------------------------------------------------
-# TAB 1: PROSES & PREVIEW FRAME
+# TAB 1: VIDEO INFERENSI & PREVIEW FRAME
 # ------------------------------------------------------------------------------
 with tab_proses:
-    st.subheader("Preview Pemrosesan Video & Model Deteksi")
+    st.subheader(f"🎬 Video Hasil Inferensi Model - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
-    # Informasi Status Model
+    # 1. PEMUTAR & PENGUNDUH VIDEO INFERENSI
+    video_path = st.session_state.annotated_video_path
+    if video_path and os.path.exists(video_path):
+        col_v1, col_v2 = st.columns([3, 1])
+        with col_v1:
+            st.markdown('<div class="video-card">', unsafe_allow_html=True)
+            st.video(video_path)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with col_v2:
+            st.markdown("#### 📥 Unduh Video Inferensi")
+            st.markdown(
+                "Video lengkap hasil deteksi komputer dengan anotasi bounding box kerusakan jalan, "
+                "kategori SDI, pelacakan ID objek, dan teks HUD posisi STA."
+            )
+            with open(video_path, "rb") as vf:
+                video_bytes = vf.read()
+
+            st.download_button(
+                label="📥 Unduh Video MP4 (.mp4)",
+                data=video_bytes,
+                file_name=f"inferensi_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
+                mime="video/mp4",
+                use_container_width=True
+            )
+            st.caption("Format H.264 MP4 kompatibel dengan semua media player.")
+
+            st.markdown("---")
+            st.metric("Total Segmen", f"{len(st.session_state.segments)} segmen")
+            st.metric("Panjang Terdeteksi", f"{st.session_state.survey_stats.get('total_length_m', 0):.1f} m")
+    else:
+        st.info("💡 Belum ada video yang diproses. Silakan upload video survei Anda di sidebar atau klik **'🧪 Jalankan Demo'** untuk mencoba.")
+
+    st.markdown("---")
+
+    # 2. STATUS MODEL
+    st.markdown("#### 🔍 Status Model AI & Adapter")
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
-        st.info("🤖 **Road Damage Detector:** RDD2022 YOLO (5 kelas: retak, lubang, dll)")
+        st.info("🤖 **Road Damage Detector:** YOLO RDD2022 (5 Kelas: Retak, Lubang, dll)")
     with col_m2:
-        st.info("🛣️ **Pavement Classifier:** YOLO Classify (Hotmix, Lapen, Beton, Kerikil, Tanah)")
+        st.info("🛣️ **Pavement Classifier:** YOLO Classify (Hotmix, Lapen, Beton, dll)")
     with col_m3:
-        st.info(f"📍 **STA Estimator:** Mode `{sta_mode}` ({survey_speed_kmh} km/jam)")
+        st.info("📍 **Model GPS / STA:** Berjalan Mandiri Menggunakan `gps_sta_model/`")
 
+    # 3. SAMPLE FRAME RESOLUSI PENUH
     if st.session_state.preview_frames:
-        st.write(f"Tersedia {len(st.session_state.preview_frames)} sampel frame dengan visualisasi bounding box & HUD:")
-        frame_select_idx = st.slider("Pilih Sampel Frame", 0, len(st.session_state.preview_frames) - 1, 0)
+        st.markdown("#### 🖼️ Pratinjau Tangkapan Frame Resolusi Penuh")
+        frame_select_idx = st.slider("Pilih Frame Sampel", 0, len(st.session_state.preview_frames) - 1, 0)
         selected_sample = st.session_state.preview_frames[frame_select_idx]
 
         col_img, col_det_info = st.columns([3, 1])
@@ -344,23 +395,20 @@ with tab_proses:
         with col_det_info:
             st.metric("STA Posisi", f"{selected_sample['sta_m']:.1f} m")
             st.metric("Jenis Perkerasan", selected_sample["pavement"])
-            st.metric("Objek Terdeteksi", f"{selected_sample['det_count']} objek")
+            st.metric("Kerusakan Terdeteksi", f"{selected_sample['det_count']} objek")
             st.caption("Kotak oranye: Kerusakan Retak • Kotak merah: Lubang (Pothole)")
-    else:
-        st.warning("Belum ada video yang diproses. Silakan upload video di sidebar atau klik **'Jalankan Demo'**.")
 
 
 # ------------------------------------------------------------------------------
 # TAB 2: TABEL HASIL SDI (UTAMA)
 # ------------------------------------------------------------------------------
 with tab_hasil:
-    st.subheader("Tabel Rekapitulasi Kondisi Jalan (Metode SDI PKRMS)")
+    st.subheader(f"Tabel Rekapitulasi Kondisi Jalan - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
     segments = st.session_state.segments
     if not segments:
         st.info("💡 Data belum tersedia. Silakan jalankan proses video atau tekan tombol 'Jalankan Demo' di sidebar.")
     else:
-        # Checkbox Toggle Kolom Detail
         col_tog1, col_tog2, col_tog3 = st.columns([2, 1, 1])
         with col_tog1:
             show_details = st.checkbox("🔍 Tampilkan Kolom Detail (% Luas Retak, Lebar Retak, Lubang/km, Alur, Flag)", value=False)
@@ -369,7 +417,6 @@ with tab_hasil:
         with col_tog3:
             filter_pavement = st.multiselect("Filter Perkerasan", list(set(s.pavement_type for s in segments)), default=[])
 
-        # Filter Segmen
         filtered_segments = segments
         if filter_condition:
             filtered_segments = [s for s in filtered_segments if s.condition in filter_condition]
@@ -378,7 +425,6 @@ with tab_hasil:
 
         df_table = segments_to_dataframe(filtered_segments, include_details=show_details)
 
-        # Pewarnaan baris DataFrame sesuai Kondisi
         def color_condition_rows(val):
             colors = {
                 "Baik": "background-color: #D4EDDA; color: #155724; font-weight: bold;",
@@ -391,7 +437,6 @@ with tab_hasil:
         styled_df = df_table.style.map(color_condition_rows, subset=["Kondisi"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-        # Penjelasan Formula SDI Tabel 9 & 10
         with st.expander("📖 Panduan & Logika Rumus SDI (Tabel 9 & 10 PKRMS)"):
             st.markdown("""
             - **Level 1 (% Luas Retak):** Tidak ada $\\to 0$ ; $< 10\\% \\to 5$ ; $10 - 30\\% \\to 20$ ; $> 30\\% \\to 40$.
@@ -410,7 +455,7 @@ with tab_hasil:
 # TAB 3: VISUALISASI & KPI
 # ------------------------------------------------------------------------------
 with tab_vis:
-    st.subheader("Ringkasan Indikator Kinerja Utama (KPI) & Grafik Distribusi")
+    st.subheader(f"Ringkasan KPI & Analisis Kondisi - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
     segments = st.session_state.segments
     if not segments:
@@ -430,7 +475,7 @@ with tab_vis:
         with kpi1:
             st.markdown(f"""
             <div class="kpi-card">
-                <div class="kpi-title">Panjang Total Ruas</div>
+                <div class="kpi-title">Panjang Total Otomatis</div>
                 <div class="kpi-val">{total_length_m:.1f} m</div>
                 <div class="kpi-note">{total_length_m/1000:.2f} km • {len(segments)} segmen</div>
             </div>
@@ -462,9 +507,8 @@ with tab_vis:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Grafik 1: Diagram Batang Nilai SDI vs STA
-        st.subheader("📈 Profil Nilai SDI Sepanjang STA")
-
+        # Grafik Profil SDI vs STA
+        st.subheader("📈 Profil Nilai SDI Sepanjang Ruas Jalan")
         chart_data = []
         for s in segments:
             center_sta = (s.sta_start + s.sta_end) / 2.0
@@ -477,7 +521,6 @@ with tab_vis:
                 "Nilai SDI": s.sdi_value,
                 "Kondisi": s.condition,
                 "Perkerasan": s.pavement_type,
-                "Color": s.color
             })
         df_chart = pd.DataFrame(chart_data)
 
@@ -493,16 +536,14 @@ with tab_vis:
                 "Rusak Berat": "#E74C3C"
             },
             hover_data=["STA Start", "STA End", "Panjang", "Perkerasan"],
-            title="Distribusi Nilai SDI per Segmen"
+            title=f"Distribusi Nilai SDI per Segmen - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}"
         )
-        # Tambahkan garis batas kondisi
         fig_bar.add_hline(y=50, line_dash="dash", line_color="#F1C40F", annotation_text="Batas Sedang (50)")
         fig_bar.add_hline(y=100, line_dash="dash", line_color="#E67E22", annotation_text="Batas Rusak Ringan (100)")
         fig_bar.add_hline(y=150, line_dash="dash", line_color="#E74C3C", annotation_text="Batas Rusak Berat (150)")
         fig_bar.update_layout(xaxis_title="Rentang STA (meter)", yaxis_title="Nilai SDI")
         st.plotly_chart(fig_bar, use_container_width=True)
 
-        # Grafik 2 & 3: Donut Chart Proporsi Kondisi & Proporsi Perkerasan
         col_pie1, col_pie2 = st.columns(2)
         with col_pie1:
             st.subheader("🍰 Proporsi Kondisi Jalan (% Panjang)")
@@ -548,20 +589,17 @@ with tab_vis:
 # TAB 4: PETA SPASIAL KONDISI JALAN
 # ------------------------------------------------------------------------------
 with tab_peta:
-    st.subheader("Peta Spasial Segmen Kondisi Jalan")
+    st.subheader(f"Peta Spasial Segmen - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
     segments = st.session_state.segments
     if not segments:
         st.info("💡 Belum ada data spasial yang tersedia.")
     else:
-        # Buat koordinat segmen untuk visualisasi PyDeck
-        # Titik dasar default
         base_lat = -6.2088
         base_lon = 106.8456
 
         path_data = []
         for s in segments:
-            # Perkiraan koordinat awal & akhir berdasarkan STA
             lat_start = base_lat + (s.sta_start * 0.000009)
             lon_start = base_lon + (s.sta_start * 0.000009)
             lat_end = base_lat + (s.sta_end * 0.000009)
@@ -626,7 +664,6 @@ with tab_koreksi:
     if not segments:
         st.info("💡 Tidak ada data segmen untuk dikoreksi.")
     else:
-        # Siapkan DataFrame untuk st.data_editor
         edit_records = []
         for idx, s in enumerate(segments):
             edit_records.append({
@@ -666,7 +703,6 @@ with tab_koreksi:
             recalculate_btn = st.button("🔄 Hitung Ulang SDI", type="primary")
 
         if recalculate_btn:
-            # Terapkan perubahan pengguna ke segmen
             overrides = []
             for _, row in edited_df.iterrows():
                 overrides.append({
@@ -679,17 +715,14 @@ with tab_koreksi:
 
             updated_segs = apply_manual_corrections(segments, overrides)
 
-            # Hitung ulang SDI untuk setiap segmen yang diperbarui
             road_w = st.session_state.road_info.get("road_width_m", 6.0)
             crack_thresh = st.session_state.road_info.get("crack_width_thresh", 3.0)
 
             for seg in updated_segs:
-                # Recalculate crack pct berdasarkan panjang baru
                 surface_area = max(1.0, seg.length_m * road_w)
                 new_crack_pct = min(100.0, (seg.total_crack_area_m2 / surface_area) * 100.0)
                 seg.crack_area_pct = round(new_crack_pct, 2)
 
-                # Skala ulang lubang per km
                 new_potholes_km = (seg.unique_potholes * 1000.0) / max(1.0, seg.length_m)
                 seg.potholes_per_km = round(new_potholes_km, 2)
 
@@ -721,7 +754,7 @@ with tab_koreksi:
 # TAB 6: EKSPOR LAPORAN
 # ------------------------------------------------------------------------------
 with tab_export:
-    st.subheader("Ekspor Data & Laporan Hasil Survei")
+    st.subheader(f"Ekspor Data & Laporan Hasil Survei - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
     segments = st.session_state.segments
     if not segments:
@@ -729,48 +762,55 @@ with tab_export:
     else:
         st.markdown(
             "Unduh laporan lengkap hasil evaluasi survei kondisi jalan berbasis SDI "
-            "dalam berbagai format untuk kebutuhan pelaporan Dinas PUPR / Ditjen Bina Marga:"
+            "dalam berbagai format untuk pelaporan Dinas PUPR / Ditjen Bina Marga:"
         )
 
-        col_ex1, col_ex2, col_ex3 = st.columns(3)
+        col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
 
-        # 1. Ekspor CSV
         with col_ex1:
             csv_data = export_to_csv(segments)
             st.download_button(
-                label="📄 Unduh Format CSV",
+                label="📄 Unduh Data CSV",
                 data=csv_data,
                 file_name=f"survei_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
-            st.caption("Data mentah terstruktur untuk analisis lanjutan atau database.")
 
-        # 2. Ekspor Excel
         with col_ex2:
             excel_bytes = export_to_excel(segments, st.session_state.road_info)
             st.download_button(
-                label="📊 Unduh Excel Formatted (.xlsx)",
+                label="📊 Unduh Excel (.xlsx)",
                 data=excel_bytes,
                 file_name=f"laporan_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-            st.caption("File Excel dengan pewarnaan kondisi, ringkasan KPI, dan layout rapi.")
 
-        # 3. Laporan Ringkas HTML / Cetak PDF
         with col_ex3:
             html_report = export_to_html_report(segments, st.session_state.road_info)
             st.download_button(
-                label="📑 Unduh Laporan Cetak (HTML)",
+                label="📑 Unduh Cetak (HTML)",
                 data=html_report,
                 file_name=f"laporan_resmi_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.html",
                 mime="text/html",
                 use_container_width=True
             )
-            st.caption("Buka di browser dan pilih Cetak / Simpan sebagai PDF (Ctrl+P).")
+
+        with col_ex4:
+            if st.session_state.annotated_video_path and os.path.exists(st.session_state.annotated_video_path):
+                with open(st.session_state.annotated_video_path, "rb") as vf:
+                    vid_dl_bytes = vf.read()
+                st.download_button(
+                    label="🎬 Unduh Video (.mp4)",
+                    data=vid_dl_bytes,
+                    file_name=f"video_inferensi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
+                    mime="video/mp4",
+                    use_container_width=True
+                )
+            else:
+                st.button("🎬 Unduh Video (.mp4)", disabled=True, use_container_width=True)
 
         st.markdown("---")
         with st.expander("👁️ Pratinjau Laporan Ringkas"):
             st.components.v1.html(html_report, height=600, scrolling=True)
-

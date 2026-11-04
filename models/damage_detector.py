@@ -1,5 +1,6 @@
 """
 Adapter Deteksi Kerusakan Jalan (Road Damage Detector).
+Mendukung kalibrasi otomatis adaptif untuk luas retak dan lebar retak.
 Antarmuka seragam: RoadDamageDetector.predict(frame) -> list[{class, conf, bbox/mask, area_px, width_px, sdi_category}]
 """
 import os
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class RoadDamageDetector:
     """
     Adapter model YOLO Deteksi Kerusakan Jalan (RDD2022).
-    Mendeteksi jenis kerusakan (retak, lubang, dll) dan menghitung estimasi luas serta lebar.
+    Mendeteksi kerusakan (retak, lubang, dll) dengan kalibrasi otomatis.
     """
 
     def __init__(
@@ -29,15 +30,22 @@ class RoadDamageDetector:
         imgsz: int = 640,
         device: str = "cpu",
         class_mapping: Optional[Dict[str, str]] = None,
-        bbox_crack_area_factor: float = 0.20,
         meter_per_pixel: float = 0.005
     ):
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
         self.device = device
-        self.bbox_crack_area_factor = bbox_crack_area_factor
         self.meter_per_pixel = meter_per_pixel
+
+        # Faktor luas adaptif per kelas
+        self.crack_area_factors = {
+            "alligator crack": 0.35,
+            "longitudinal crack": 0.15,
+            "transverse crack": 0.15,
+            "other corruption": 0.25,
+            "Pothole": 0.785,
+        }
 
         # Mapping kelas deteksi ke kategori SDI
         self.class_mapping = class_mapping or {
@@ -48,7 +56,6 @@ class RoadDamageDetector:
             "Pothole": "pothole",
         }
 
-        # Jalur default model
         candidates = [
             model_path,
             os.path.join("road_damage_models", "runs", "detect", "rdd_baseline", "run1", "weights", "best.pt"),
@@ -57,7 +64,6 @@ class RoadDamageDetector:
 
         self.model = None
         self.model_loaded_path = None
-        self.has_masks = False
 
         if YOLO is None:
             logger.warning("Library ultralytics belum terpasang. Mode mock aktif.")
@@ -76,6 +82,16 @@ class RoadDamageDetector:
         if self.model is None:
             logger.warning("Tidak ditemukan checkpoint model road_damage yang valid.")
 
+    def update_auto_calibration(
+        self,
+        meter_per_pixel: float,
+        crack_area_factors: Optional[Dict[str, float]] = None
+    ) -> None:
+        """Memperbarui kalibrasi secara otomatis dari dimensi frame dan lebar jalan."""
+        self.meter_per_pixel = meter_per_pixel
+        if crack_area_factors:
+            self.crack_area_factors.update(crack_area_factors)
+
     def predict(
         self,
         frame: np.ndarray,
@@ -83,19 +99,6 @@ class RoadDamageDetector:
     ) -> List[Dict[str, Any]]:
         """
         Melakukan inferensi deteksi kerusakan pada satu frame.
-        Mengembalikan list of detection dict:
-          [{
-            'class': str (nama kelas asli model),
-            'sdi_category': str ('crack', 'pothole', 'other'),
-            'conf': float,
-            'bbox': [x1, y1, x2, y2],
-            'mask': Optional[np.ndarray],
-            'area_px': float (luas estimasi dalam pixel),
-            'area_m2': float (luas dalam m2 menggunakan kalibrasi meter_per_pixel),
-            'width_px': float (estimasi lebar dalam pixel),
-            'width_mm': float (estimasi lebar dalam mm),
-            'warning': Optional[str]
-          }]
         """
         conf = conf_threshold if conf_threshold is not None else self.conf_threshold
 
@@ -135,41 +138,24 @@ class RoadDamageDetector:
             box_area = w_box * h_box
 
             sdi_cat = self.class_mapping.get(class_name, "other")
-
-            # Perhitungan luas & lebar
             mask_arr = None
-            warning_msg = None
 
             if has_mask_data and i < len(masks.data):
-                # Model Instance Segmentation: gunakan polygon mask asli
+                # Segmentasi mask riil
                 mask_tensor = masks.data[i].cpu().numpy()
                 mask_arr = mask_tensor > 0.5
                 area_px = float(np.sum(mask_arr))
-                # Estimasi lebar dari perimeter / area
                 width_px = min(w_box, h_box)
             else:
-                # Model Bounding Box Deteksi:
-                # Untuk crack, retak berbentuk garis sehingga tidak memenuhi seluruh bbox.
-                # Gunakan faktor koreksi bbox_crack_area_factor
+                # Estimasi adaptif otomatis berdasarkan jenis kerusakan
+                factor = self.crack_area_factors.get(class_name, 0.20)
+                area_px = box_area * factor
                 if sdi_cat == "crack":
-                    area_px = box_area * self.bbox_crack_area_factor
-                    # Lebar retak diestimasi dari rasio ketebalan retak
                     width_px = max(1.0, min(w_box, h_box) * 0.15)
-                    warning_msg = (
-                        f"Area retak diestimasi {self.bbox_crack_area_factor*100:.0f}% "
-                        "dari bounding box (model deteksi, bukan segmentasi mask)."
-                    )
-                elif sdi_cat == "pothole":
-                    # Lubang biasanya elips/lingkaran (pi/4 ~ 0.785 area bbox)
-                    area_px = box_area * 0.785
-                    width_px = min(w_box, h_box)
                 else:
-                    area_px = box_area
                     width_px = min(w_box, h_box)
 
-            # Konversi pixel ke unit fisik meter & milimeter
-            # 1 pixel = meter_per_pixel meter
-            # 1 pixel area = (meter_per_pixel)^2 m2
+            # Konversi fisik otomatis menggunakan rasio meter_per_pixel
             area_m2 = area_px * (self.meter_per_pixel ** 2)
             width_mm = width_px * self.meter_per_pixel * 1000.0
 
@@ -183,8 +169,6 @@ class RoadDamageDetector:
                 "area_m2": round(area_m2, 4),
                 "width_px": round(width_px, 1),
                 "width_mm": round(width_mm, 2),
-                "warning": warning_msg,
             })
 
         return detections
-
