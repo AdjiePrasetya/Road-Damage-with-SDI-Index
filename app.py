@@ -3,10 +3,7 @@ Dashboard Survei Kondisi Jalan Berbasis SDI (Surface Distress Index)
 Sesuai Manual PKRMS (SE Dirjen Bina Marga No. 22/SE/Db/2021, Manual No. 04/M/BM/2021 Bab 4.2.5).
 
 Direktorat Jenderal Bina Marga - Kementerian Pekerjaan Umum dan Perumahan Rakyat.
-Fitur:
-- Nama Ruas Jalan Otomatis Diambil dari Nama File Video
-- Estimasi STA & Jarak Mandiri Berbasis Model gps_sta_model (Tanpa OCR)
-- Auto-Calibration Computer Vision & Video Inferensi Lengkap
+Dioptimalkan untuk Deployment Streamlit Cloud (Bebas Chunk Error & Cache Mismatch).
 """
 import os
 import yaml
@@ -97,14 +94,50 @@ st.markdown("""
         border: 1px solid #E2E8F0;
         margin-bottom: 20px;
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+    /* Tabel HTML Khusus SDI */
+    .sdi-table-wrapper {
+        width: 100%;
+        overflow-x: auto;
+        margin-top: 15px;
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
     }
-    .stTabs [data-baseweb="tab"] {
-        padding: 10px 18px;
+    .sdi-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 13px;
+    }
+    .sdi-table th {
+        background-color: #1F497D;
+        color: #FFFFFF;
+        padding: 12px 14px;
+        text-align: center;
         font-weight: 600;
-        border-radius: 4px 4px 0 0;
+        white-space: nowrap;
     }
+    .sdi-table td {
+        padding: 10px 14px;
+        border-bottom: 1px solid #EDF2F7;
+        color: #2D3748;
+    }
+    .sdi-table tr:hover {
+        background-color: #F7FAFC;
+    }
+    .badge-cond {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 12px;
+        text-align: center;
+    }
+    .badge-baik { background-color: #D4EDDA; color: #155724; border: 1px solid #C3E6CB; }
+    .badge-sedang { background-color: #FFF3CD; color: #856404; border: 1px solid #FFEEBA; }
+    .badge-ringan { background-color: #FFE5D0; color: #B35300; border: 1px solid #FFD1B3; }
+    .badge-berat { background-color: #F8D7DA; color: #721C24; border: 1px solid #F5C6CB; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { padding: 10px 18px; font-weight: 600; border-radius: 4px 4px 0 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -125,13 +158,6 @@ CONFIG = load_config()
 
 @st.cache_resource
 def load_models():
-    """
-    Memuat model deep learning & adapter dengan st.cache_resource.
-    Ketiga model langsung dimuat dari foldernya masing-masing:
-    1. road_damage_models/
-    2. perkerasan_clf_models/
-    3. gps_sta_model/
-    """
     logger.info("Memuat model deep learning & adapter...")
     damage_det = RoadDamageDetector(
         conf_threshold=0.25,
@@ -189,7 +215,6 @@ with st.sidebar:
     # EKSTRAKSI OTOMATIS NAMA JALAN DARI FILE VIDEO
     if uploaded_video is not None:
         raw_name = os.path.splitext(uploaded_video.name)[0]
-        # Bersihkan karakter underscore atau strip
         clean_name = raw_name.replace("_", " ").replace("-", " ").strip().title()
         st.session_state.detected_road_name = clean_name
 
@@ -227,8 +252,8 @@ with st.sidebar:
     st.markdown("""
     <div class="auto-badge">
         <strong>⚡ Otomasi Aktif:</strong><br>
-        • Nama ruas jalan otomatis dari nama file video.<br>
-        • Model <code>gps_sta_model/</code> menghitung jarak & panjang mandiri (tanpa OCR).<br>
+        • Nama jalan otomatis dari nama video.<br>
+        • Model <code>gps_sta_model/</code> menghitung jarak mandiri.<br>
         • Kalibrasi kamera & resolusi dihitung otomatis.
     </div>
     """, unsafe_allow_html=True)
@@ -334,7 +359,6 @@ tab_proses, tab_hasil, tab_vis, tab_peta, tab_koreksi, tab_export = st.tabs([
 with tab_proses:
     st.subheader(f"🎬 Video Hasil Inferensi Model - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
 
-    # 1. PEMUTAR & PENGUNDUH VIDEO INFERENSI
     video_path = st.session_state.annotated_video_path
     if video_path and os.path.exists(video_path):
         col_v1, col_v2 = st.columns([3, 1])
@@ -369,7 +393,6 @@ with tab_proses:
 
     st.markdown("---")
 
-    # 2. STATUS MODEL
     st.markdown("#### 🔍 Status Model AI & Adapter")
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
@@ -379,7 +402,6 @@ with tab_proses:
     with col_m3:
         st.info("📍 **Model GPS / STA:** Berjalan Mandiri Menggunakan `gps_sta_model/`")
 
-    # 3. SAMPLE FRAME RESOLUSI PENUH
     if st.session_state.preview_frames:
         st.markdown("#### 🖼️ Pratinjau Tangkapan Frame Resolusi Penuh")
         frame_select_idx = st.slider("Pilih Frame Sampel", 0, len(st.session_state.preview_frames) - 1, 0)
@@ -400,7 +422,7 @@ with tab_proses:
 
 
 # ------------------------------------------------------------------------------
-# TAB 2: TABEL HASIL SDI (UTAMA)
+# TAB 2: TABEL HASIL SDI (UTAMA) - 100% BEBAS DYNAMIC CHUNK ERROR
 # ------------------------------------------------------------------------------
 with tab_hasil:
     st.subheader(f"Tabel Rekapitulasi Kondisi Jalan - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
@@ -409,33 +431,98 @@ with tab_hasil:
     if not segments:
         st.info("💡 Data belum tersedia. Silakan jalankan proses video atau tekan tombol 'Jalankan Demo' di sidebar.")
     else:
+        # Gunakan selectbox yang 100% stabil di semua browser (tanpa async chunk multiselect)
         col_tog1, col_tog2, col_tog3 = st.columns([2, 1, 1])
         with col_tog1:
             show_details = st.checkbox("🔍 Tampilkan Kolom Detail (% Luas Retak, Lebar Retak, Lubang/km, Alur, Flag)", value=False)
         with col_tog2:
-            filter_condition = st.multiselect("Filter Kondisi", ["Baik", "Sedang", "Rusak Ringan", "Rusak Berat"], default=[])
+            filter_cond_choice = st.selectbox(
+                "Filter Kondisi",
+                ["Semua Kondisi", "Baik", "Sedang", "Rusak Ringan", "Rusak Berat"],
+                index=0
+            )
         with col_tog3:
-            filter_pavement = st.multiselect("Filter Perkerasan", list(set(s.pavement_type for s in segments)), default=[])
+            all_paves = sorted(list(set(s.pavement_type for s in segments)))
+            filter_pave_choice = st.selectbox(
+                "Filter Perkerasan",
+                ["Semua Perkerasan"] + all_paves,
+                index=0
+            )
 
+        # Terapkan filter
         filtered_segments = segments
-        if filter_condition:
-            filtered_segments = [s for s in filtered_segments if s.condition in filter_condition]
-        if filter_pavement:
-            filtered_segments = [s for s in filtered_segments if s.pavement_type in filter_pavement]
+        if filter_cond_choice != "Semua Kondisi":
+            filtered_segments = [s for s in filtered_segments if s.condition == filter_cond_choice]
+        if filter_pave_choice != "Semua Perkerasan":
+            filtered_segments = [s for s in filtered_segments if s.pavement_type == filter_pave_choice]
 
-        df_table = segments_to_dataframe(filtered_segments, include_details=show_details)
+        # RENDER TABEL HTML NATIVE (KEBAL TERHADAP CHUNK / CSS PRELOAD ERROR DI STREAMLIT CLOUD)
+        badge_classes = {
+            "Baik": "badge-baik",
+            "Sedang": "badge-sedang",
+            "Rusak Ringan": "badge-ringan",
+            "Rusak Berat": "badge-berat",
+        }
 
-        def color_condition_rows(val):
-            colors = {
-                "Baik": "background-color: #D4EDDA; color: #155724; font-weight: bold;",
-                "Sedang": "background-color: #FFF3CD; color: #856404; font-weight: bold;",
-                "Rusak Ringan": "background-color: #FFE5D0; color: #B35300; font-weight: bold;",
-                "Rusak Berat": "background-color: #F8D7DA; color: #721C24; font-weight: bold;",
-            }
-            return colors.get(val, "")
+        th_extra = ""
+        if show_details:
+            th_extra = """
+                <th>% Luas Retak</th>
+                <th>Lebar Retak (mm)</th>
+                <th>Lubang/km</th>
+                <th>Alur (cm)</th>
+                <th>Status / Flag</th>
+            """
 
-        styled_df = df_table.style.map(color_condition_rows, subset=["Kondisi"])
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        rows_html = ""
+        for s in filtered_segments:
+            b_class = badge_classes.get(s.condition, "badge-baik")
+            td_extra = ""
+            if show_details:
+                td_extra = f"""
+                    <td style="text-align: right;">{s.crack_area_pct:.2f}%</td>
+                    <td style="text-align: right;">{s.avg_crack_width_mm:.2f}</td>
+                    <td style="text-align: right;">{s.potholes_per_km:.1f}</td>
+                    <td style="text-align: right;">{s.rut_depth_cm:.1f}</td>
+                    <td style="text-align: center;"><small>{s.flag}</small></td>
+                """
+
+            rows_html += f"""
+            <tr>
+                <td><strong>{s.road_name}</strong></td>
+                <td style="text-align: center;">{s.sta_start:.0f} m</td>
+                <td style="text-align: center;">{s.sta_end:.0f} m</td>
+                <td style="text-align: center; font-weight: bold; font-size: 14px;">{s.sdi_value:.1f}</td>
+                <td style="text-align: center;">{s.pavement_type}</td>
+                <td style="text-align: center;"><span class="badge-cond {b_class}">{s.condition}</span></td>
+                <td>{s.recommendation}</td>
+                {td_extra}
+            </tr>
+            """
+
+        table_html = f"""
+        <div class="sdi-table-wrapper">
+            <table class="sdi-table">
+                <thead>
+                    <tr>
+                        <th>Nama Jalan</th>
+                        <th>STA Awal</th>
+                        <th>STA Akhir</th>
+                        <th>Nilai SDI</th>
+                        <th>Jenis Perkerasan</th>
+                        <th>Kondisi</th>
+                        <th>Saran Perbaikan</th>
+                        {th_extra}
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+        """
+        st.markdown(table_html, unsafe_allow_html=True)
+        st.caption(f"Menampilkan {len(filtered_segments)} dari total {len(segments)} segmen.")
 
         with st.expander("📖 Panduan & Logika Rumus SDI (Tabel 9 & 10 PKRMS)"):
             st.markdown("""
@@ -444,10 +531,10 @@ with tab_hasil:
             - **Level 3 (Lubang/km):** Tidak ada $\\to +0$ ; $< 10$/km $\\to +15$ ; $10 - 50$/km $\\to +75$ ; $> 50$/km $\\to +225$.
             - **Level 4 (Alur/Rutting cm):** Tidak ada $\\to +0$ ; $< 1$ cm $\\to +2.5$ ; $1 - 3$ cm $\\to +10$ ; $> 3$ cm $\\to +20$.
             - **Klasifikasi Kondisi (Tabel 10):**
-              - $\\text{SDI} < 50$ : **Baik** (Hijau)
-              - $50 \\le \\text{SDI} < 100$ : **Sedang** (Kuning)
-              - $100 \\le \\text{SDI} < 150$ : **Rusak Ringan** (Oranye)
-              - $\\text{SDI} \\ge 150$ : **Rusak Berat** (Merah)
+              - $\\text{SDI} < 50$ : **Baik** (🟢 Hijau)
+              - $50 \\le \\text{SDI} < 100$ : **Sedang** (🟡 Kuning)
+              - $100 \\le \\text{SDI} < 150$ : **Rusak Ringan** (🟠 Oranye)
+              - $\\text{SDI} \\ge 150$ : **Rusak Berat** (🔴 Merah)
             """)
 
 
@@ -470,7 +557,6 @@ with tab_vis:
         kemantapan_pct = (mantap_length_m / total_length_m * 100.0) if total_length_m > 0 else 0.0
         rusak_length_m = total_length_m - mantap_length_m
 
-        # Ringkasan KPI Cards
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         with kpi1:
             st.markdown(f"""
@@ -507,7 +593,6 @@ with tab_vis:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Grafik Profil SDI vs STA
         st.subheader("📈 Profil Nilai SDI Sepanjang Ruas Jalan")
         chart_data = []
         for s in segments:
