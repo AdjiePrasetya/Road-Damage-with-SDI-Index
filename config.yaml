@@ -11,22 +11,23 @@ app:
 # 1. PATH MODEL & SPESIFIKASI INFERENSI
 # ------------------------------------------------------------------------------
 models:
-  # Model Deteksi Kerusakan Jalan (RDD2022)
+  # Model Deteksi & Segmentasi Kerusakan Jalan Sesuai Panduan SDI PKRMS
   road_damage:
-    # Model terbaik hasil training pada folder runs
-    primary_path: "road_damage_models/runs/detect/rdd_baseline/run1/weights/best.pt"
-    # Fallback jika model training tidak ditemukan
-    fallback_path: "road_damage_models/weights/yolo26n.pt"
+    # 1. Model Segmentasi Retak (Cracks: <1mm, 1-3mm, >3mm)
+    cracks_path: "road_damage_models/cracks/weights/best.pt"
+    # 2. Model Segmentasi Lubang (Potholes)
+    potholes_path: "road_damage_models/potholes/weights/best.pt"
+    # 3. Model Segmentasi Alur/Rutting (Rutting: <1cm, 1-3cm, >3cm)
+    rutting_path: "road_damage_models/rutting/weights/best.pt"
+    
     confidence_threshold: 0.25
     iou_threshold: 0.45
     imgsz: 640
-    device: "cpu" # 'cpu' atau '0' (GPU CUDA jika tersedia)
+    device: "cpu"
 
   # Model Klasifikasi Jenis Perkerasan
   perkerasan_clf:
-    # Model terbaik hasil training klasifikasi 5 kelas
     primary_path: "perkerasan_clf_models/runs/perkerasan_cls/weights/best.pt"
-    # Fallback jika model training tidak ditemukan
     fallback_path: "perkerasan_clf_models/weights/yolo26n.pt"
     confidence_threshold: 0.30
     imgsz: 320
@@ -34,31 +35,27 @@ models:
 
   # Model Estimasi STA / GPS
   gps_sta:
-    # Mode estimasi STA:
-    # - "speed_time"   : Menggunakan kecepatan konstan kendaraan survei (STA = STA_awal + waktu * v)
-    # - "ocr_overlay"  : Membaca teks koordinat / STA yang tercetak (overlay) pada frame video
-    # - "custom_yolo"  : Model YOLO deteksi khusus jika user memiliki bobot patok/angka
-    mode: "speed_time"
-    default_speed_kmh: 30.0 # Kecepatan survei tipikal (30 km/jam = 8.33 m/s)
-    # TODO (USER): Jika menggunakan OCR overlay pada video dashcam, tentukan area koordinat teks [ymin, xmin, ymax, xmax] normalisasi 0-1
-    ocr_crop_box: [0.85, 0.0, 1.0, 0.50]
-    # Path model custom jika ada:
-    custom_model_path: "gps_sta_model/weights/yolo26n.pt"
+    model_path: "gps_sta_model/weights/yolo26n.pt"
+    default_speed_kmh: 30.0
 
 # ------------------------------------------------------------------------------
-# 2. MAPPING KELAS MODEL KE KATEGORI SDI
+# 2. MAPPING KELAS MODEL KE KATEGORI SDI PKRMS
 # ------------------------------------------------------------------------------
-# TODO (USER): Periksa apakah mapping kelas berikut sudah sesuai dengan label dataset Anda.
 class_mapping:
-  # Pemetaan kelas deteksi kerusakan (RDD 2022) ke kategori SDI (crack, pothole, rutting, other)
+  # Pemetaan kelas deteksi kerusakan segmentasi ke kategori SDI
   road_damage:
-    "longitudinal crack": "crack"      # D00 - Retak Memanjang
-    "transverse crack": "crack"        # D10 - Retak Melintang
-    "alligator crack": "crack"         # D20 - Retak Buaya
-    "other corruption": "other"        # D40 - Kerusakan lain (tidak masuk SDI inti)
-    "Pothole": "pothole"               # D40 / Lubang
+    # Kelas Model Cracks
+    "crack_lt_1mm": "crack"
+    "crack_1_3mm": "crack"
+    "crack_gt_3mm": "crack"
+    # Kelas Model Potholes
+    "pothole": "pothole"
+    # Kelas Model Rutting
+    "rut_lt_1cm": "rutting"
+    "rut_1_3cm": "rutting"
+    "rut_gt_3cm": "rutting"
 
-  # Pemetaan kelas klasifikasi perkerasan ke tipe standar PKRMS
+  # Pemetaan kelas klasifikasi perkerasan
   perkerasan:
     "hotmix": "Hotmix"                 # Aspal beton (Flexible pavement)
     "lapen": "Lapen"                   # Lapis penetrasi makadam (Aspal)
@@ -89,9 +86,6 @@ sdi_table_9:
 
   # Level 2: Rata-rata Lebar Retak (mm)
   crack_width:
-    # Nilai ambang batas pemantik pengali x 2.
-    # CATATAN: Tabel 9 Manual PKRMS menetapkan '> 3 mm', sedangkan narasi pada teks manual
-    # halaman 38 menyebutkan '> 5 mm'. Default di sini adalah 3.0 mm sesuai Tabel 9.
     threshold_mm: 3.0
     multiplier: 2.0
 
@@ -111,8 +105,7 @@ sdi_table_9:
       min_count: 50.0
       add_sdi: 225
 
-  # Level 4: Rata-rata Kedalaman Alur / Rutting Bekas Roda (cm)
-  # Input manual / sensor 3D karena video 2D tidak mengukur elevasi secara langsung
+  # Level 4: Rata-rata Kedalaman Alur / Rutting Bekas Roda (cm) - OTOMATIS DARI MODEL
   rutting_depth_cm:
     none:
       depth: 0.0
@@ -135,46 +128,38 @@ sdi_table_10:
   good:
     max_sdi: 50.0
     label: "Baik"
-    color: "#2ECC71"       # Hijau
-    badge: "success"
+    color: "#2ECC71"
   fair:
     min_sdi: 50.0
     max_sdi: 100.0
     label: "Sedang"
-    color: "#F1C40F"       # Kuning
-    badge: "warning"
+    color: "#F1C40F"
   poor:
     min_sdi: 100.0
     max_sdi: 150.0
     label: "Rusak Ringan"
-    color: "#E67E22"       # Oranye
-    badge: "danger"
+    color: "#E67E22"
   bad:
     min_sdi: 150.0
     label: "Rusak Berat"
-    color: "#E74C3C"       # Merah
-    badge: "dark"
+    color: "#E74C3C"
 
 # ------------------------------------------------------------------------------
 # 5. REKOMENDASI PENANGANAN (Default Standar Bina Marga)
 # ------------------------------------------------------------------------------
 recommendations:
-  # Penanganan Jalan Beraspal (Hotmix / Lapen)
   aspal:
     "Baik": "Pemeliharaan rutin (pembersihan drainase, tambal kecil, pemeliharaan bahu)"
     "Sedang": "Pemeliharaan rutin intensif / pemeliharaan berkala ringan (tambal retak, crack sealing, fog seal / laburan aspal)"
     "Rusak Ringan": "Pemeliharaan berkala (patching lubang + overlay / lapis ulang tipis)"
     "Rusak Berat": "Rehabilitasi / peningkatan struktur (overlay tebal, perbaikan struktur, rekonstruksi setempat)"
 
-  # Penanganan Jalan Beton / Semen (Kaku)
-  # CATATAN: Manual SDI PKRMS dirancang baku untuk perkerasan beraspal. Untuk beton rekomendasi bersifat indikatif teknis.
   beton:
     "Baik": "Pemeliharaan rutin (pembersihan sambungan / joint & saluran samping)"
     "Sedang": "Perbaikan sambungan pelat (joint resealing) & penutupan retak rambut (crack sealing)"
     "Rusak Ringan": "Penambalan kedalaman parsial (partial depth repair), penjahitan retak (cross stitching), & injeksi semen/grouting"
     "Rusak Berat": "Penggantian pelat beton penuh (full-depth slab replacement) & stabilisasi tanah dasar"
 
-  # Penanganan Jalan Kerikil / Tanah
   unpaved:
     "Baik": "Perataan permukaan ringan & pembersihan saluran tepi"
     "Sedang": "Perataan dengan grader (grading) & pemadatan ulang setempat"
@@ -191,24 +176,10 @@ segmentation:
   min_run_length: 3             # Minimal frame berturut-turut untuk menyatakan perubahan perkerasan valid
 
 # ------------------------------------------------------------------------------
-# 7. PARAMETER KALIBRASI COMPUTER VISION
+# 7. PARAMETER KALIBRASI
 # ------------------------------------------------------------------------------
 calibration:
-  # TODO (USER): Tentukan rasio meter per pixel kamera Anda jika diketahui.
-  # Misalnya bila 1 pixel kamera setara dengan 0.005 meter (5 mm).
   meter_per_pixel: 0.005
   default_road_width_m: 6.0
-
-  # TODO (USER): Karena model RDD2022 adalah object detection (bounding box),
-  # retak tidak berbentuk persegi pejal. Nilai ini adalah rasio estimasi area retak sebenarnya
-  # terhadap total area bounding box (default 0.20 = 20% area bbox adalah retak nyata).
-  bbox_crack_area_factor: 0.20
-
-  # Asumsi default lebar retak (mm) bila estimasi resolusi bbox/pixel di bawah threshold 3mm:
-  # Dapat disesuaikan di UI sidebar.
-  default_crack_width_mm: 2.0
-
-  # Tracking IoU Threshold untuk deduplikasi objek antar frame berurutan (mencegah double-count)
-  tracking_iou_threshold: 0.30
-  tracking_max_lost_frames: 5
-
+  tracking_iou_threshold: 0.25
+  tracking_max_lost_frames: 8

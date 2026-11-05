@@ -24,9 +24,11 @@ class PavementClassifier:
     def __init__(
         self,
         model_path: Optional[str] = None,
+        weights_path: Optional[str] = None,
         imgsz: int = 320,
         device: str = "cpu",
-        class_mapping: Optional[Dict[str, str]] = None
+        class_mapping: Optional[Dict[str, str]] = None,
+        **kwargs
     ):
         self.imgsz = imgsz
         self.device = device
@@ -40,9 +42,12 @@ class PavementClassifier:
             "tanah_belum_tembus": "Tanah",
         }
 
+        target_path = model_path or weights_path
         candidates = [
-            model_path,
+            target_path,
             os.path.join("perkerasan_clf_models", "runs", "perkerasan_cls", "weights", "best.pt"),
+            os.path.join("perkerasan_clf_models", "runs", "weights", "best.pt"),
+            os.path.join("perkerasan_clf_models", "weights", "best.pt"),
             os.path.join("perkerasan_clf_models", "weights", "yolo26n.pt"),
         ]
 

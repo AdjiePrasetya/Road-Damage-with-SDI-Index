@@ -1,5 +1,5 @@
 """
-Modul Penyedia Data Demo dengan Video Hasil Inferensi Sintetis.
+Modul Penyedia Data Demo dengan Video Hasil Inferensi Sintetis (Kecepatan Normal 1x).
 """
 import os
 import cv2
@@ -14,12 +14,13 @@ from .video import convert_to_web_h264
 
 def generate_synthetic_demo_video() -> str:
     """
-    Membuat file video MP4 animasi sintetis berdurasi 4 detik
-    yang menampilkan HUD STA, perkerasan, dan bounding box deteksi.
+    Membuat file video MP4 animasi sintetis dengan kecepatan normal 1x (30 FPS, durasi 6 detik)
+    yang menampilkan pergerakan mobil, HUD STA, perkerasan, dan bounding box deteksi.
     """
     w, h = 640, 360
-    fps = 15.0
-    total_frames = 60
+    fps = 30.0
+    duration_sec = 6.0
+    total_frames = int(fps * duration_sec) # 180 frame
 
     tmp_raw = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -29,36 +30,68 @@ def generate_synthetic_demo_video() -> str:
         img = np.ones((h, w, 3), dtype=np.uint8) * 75
         sta_curr = (idx / total_frames) * 100.0
 
-        # Marka jalan bergerak
-        offset = (idx * 12) % 60
+        # Marka jalan bergerak pada kecepatan normal
+        offset = (idx * 6) % 60
         for y in range(-60 + offset, h, 60):
             cv2.line(img, (w // 2, y), (w // 2, y + 30), (255, 255, 255), 4)
 
         cv2.line(img, (80, 0), (40, h), (255, 255, 255), 3)
         cv2.line(img, (w - 80, 0), (w - 40, h), (255, 255, 255), 3)
 
-        # Kerusakan jalan (retak & lubang bergerak mendekat)
-        box_y = int(120 + (idx * 3) % 180)
-        # Box Alligator Crack
-        cv2.rectangle(img, (180, box_y), (320, box_y + 45), (0, 165, 255), 2)
-        cv2.putText(img, "ID:1 alligator crack (0.89)", (180, box_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
+        # Kerusakan jalan (retak, lubang, & alur dengan MASK KONTUR SEGMENTASI MURNI)
+        cycle_progress = (idx % 90) / 90.0
+        box_y = int(80 + cycle_progress * 180)
+        box_scale = 1.0 + cycle_progress * 0.4
+        overlay = img.copy()
 
-        # Box Pothole
-        cv2.rectangle(img, (350, box_y + 10), (420, box_y + 55), (0, 0, 255), 2)
-        cv2.putText(img, "ID:2 Pothole (0.94)", (350, box_y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+        # 1. Kontur Segmentasi Retak (Polygon lekuk alami)
+        bx1 = int(160 - cycle_progress * 20)
+        bx2 = int(bx1 + 130 * box_scale)
+        by1 = box_y
+        by2 = int(by1 + 35 * box_scale)
+        crack_pts = np.array([
+            [int(bx1), int(by1 + 15 * box_scale)],
+            [int(bx1 + 25 * box_scale), int(by1 + 2)],
+            [int(bx1 + 60 * box_scale), int(by1 + 18 * box_scale)],
+            [int(bx1 + 95 * box_scale), int(by1 + 4 * box_scale)],
+            [int(bx2), int(by1 + 15 * box_scale)],
+            [int(bx2 - 15 * box_scale), int(by2)],
+            [int(bx1 + 80 * box_scale), int(by2 - 8 * box_scale)],
+            [int(bx1 + 40 * box_scale), int(by2 + 5 * box_scale)],
+            [int(bx1 + 12 * box_scale), int(by1 + 28 * box_scale)],
+        ], dtype=np.int32)
+        cv2.fillPoly(overlay, [crack_pts], (0, 165, 255))
+        cv2.polylines(img, [crack_pts], isClosed=True, color=(0, 165, 255), thickness=2, lineType=cv2.LINE_AA)
+        cv2.putText(img, "ID:1 crack_gt_3mm (0.89)", (bx1, max(16, by1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # 2. Kontur Segmentasi Lubang (Pothole berbentuk oval organik)
+        center_x, center_y = int(390 + cycle_progress * 20), int(box_y + 20)
+        rx, ry = int(32 * box_scale), int(20 * box_scale)
+        pothole_pts = []
+        for angle in range(0, 360, 25):
+            rad = np.radians(angle)
+            jitter = 1.0 + 0.12 * np.sin(angle * 3)
+            pothole_pts.append([int(center_x + rx * jitter * np.cos(rad)), int(center_y + ry * jitter * np.sin(rad))])
+        pothole_poly = np.array(pothole_pts, dtype=np.int32)
+        cv2.fillPoly(overlay, [pothole_poly], (0, 0, 255))
+        cv2.polylines(img, [pothole_poly], isClosed=True, color=(0, 0, 255), thickness=2, lineType=cv2.LINE_AA)
+        cv2.putText(img, "ID:2 pothole (0.94)", (center_x - rx, max(16, center_y - ry - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+        # Blend semi-transparent mask segmentasi
+        cv2.addWeighted(overlay, 0.40, img, 0.60, 0, img)
 
         # HUD Top
-        cv2.rectangle(img, (0, 0), (w, 36), (20, 20, 20), -1)
+        cv2.rectangle(img, (0, 0), (w, 38), (20, 20, 20), -1)
         pave = "Hotmix" if sta_curr < 60 else "Beton"
         hud_txt = f"STA: {sta_curr:.1f} m  |  Perkerasan: {pave}  |  Deteksi: 2 kerusakan"
-        cv2.putText(img, hud_txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(img, hud_txt, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
 
         writer.write(img)
 
     writer.release()
 
     final_web = tempfile.NamedTemporaryFile(delete=False, suffix="_web.mp4").name
-    convert_to_web_h264(tmp_raw, final_web)
+    convert_to_web_h264(tmp_raw, final_web, target_fps=fps)
     if os.path.exists(tmp_raw):
         try:
             os.remove(tmp_raw)
@@ -74,9 +107,6 @@ def generate_demo_survey_data(
     road_width_m: float = 6.0,
     config: Dict[str, Any] = None
 ) -> Tuple[List[RoadSegment], List[Dict[str, Any]], Dict[str, Any], str]:
-    """
-    Menghasilkan data survei contoh beserta file video inferensi sintetis.
-    """
     raw_specs = [
         {
             "sta_start": 0.0,
@@ -175,17 +205,39 @@ def generate_demo_survey_data(
         )
         segments.append(seg)
 
-    # Frame preview
     preview_frames = []
     for i, seg in enumerate(segments[:4]):
         img = np.ones((480, 640, 3), dtype=np.uint8) * 80
+        overlay = img.copy()
         cv2.line(img, (320, 0), (320, 480), (255, 255, 255), 4)
+
         if seg.sdi_value > 50:
-            cv2.rectangle(img, (200, 220), (380, 320), (255, 165, 0), 2)
-            cv2.putText(img, "D20 Alligator Crack (0.88)", (200, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
+            crack_pts = np.array([
+                [200, 240], [250, 220], [310, 245], [370, 225],
+                [385, 290], [330, 280], [270, 320], [210, 300]
+            ], dtype=np.int32)
+            cv2.fillPoly(overlay, [crack_pts], (0, 165, 255))
+            cv2.polylines(img, [crack_pts], isClosed=True, color=(0, 165, 255), thickness=2, lineType=cv2.LINE_AA)
+            cv2.putText(img, "crack_gt_3mm (0.88)", (200, 212), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
         if seg.unique_potholes > 0:
-            cv2.rectangle(img, (260, 340), (340, 400), (255, 0, 0), 2)
-            cv2.putText(img, "D40 Pothole (0.92)", (260, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+            pothole_pts = np.array([
+                [270, 350], [305, 335], [335, 350], [345, 385],
+                [320, 405], [285, 400], [260, 375]
+            ], dtype=np.int32)
+            cv2.fillPoly(overlay, [pothole_pts], (0, 0, 255))
+            cv2.polylines(img, [pothole_pts], isClosed=True, color=(0, 0, 255), thickness=2, lineType=cv2.LINE_AA)
+            cv2.putText(img, "pothole (0.92)", (260, 325), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        if seg.rut_depth_cm > 0:
+            rut_pts = np.array([
+                [150, 200], [185, 200], [195, 370], [155, 370]
+            ], dtype=np.int32)
+            cv2.fillPoly(overlay, [rut_pts], (255, 0, 200))
+            cv2.polylines(img, [rut_pts], isClosed=True, color=(255, 0, 200), thickness=2, lineType=cv2.LINE_AA)
+            cv2.putText(img, "rut_1_3cm (0.86)", (150, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1, cv2.LINE_AA)
+
+        cv2.addWeighted(overlay, 0.40, img, 0.60, 0, img)
 
         cv2.rectangle(img, (0, 0), (640, 40), (20, 20, 20), -1)
         hud_txt = f"STA: {seg.sta_start:.0f}m - {seg.sta_end:.0f}m | {seg.pavement_type} | SDI: {seg.sdi_value:.1f} ({seg.condition})"

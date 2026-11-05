@@ -26,19 +26,23 @@ class StaEstimator:
     def __init__(
         self,
         model_path: Optional[str] = None,
+        weights_path: Optional[str] = None,
         sta_start_m: float = 0.0,
         default_speed_kmh: float = 30.0,
-        gps_start_coord: Optional[Tuple[float, float]] = None
+        gps_start_coord: Optional[Tuple[float, float]] = None,
+        **kwargs
     ):
         self.sta_start_m = sta_start_m
         self.default_speed_kmh = default_speed_kmh
         self.gps_start_coord = gps_start_coord or (-6.2088, 106.8456)
 
+        target_path = model_path or weights_path
         # Path model dari folder gps_sta_model/
         candidates = [
-            model_path,
+            target_path,
             os.path.join("gps_sta_model", "weights", "yolo26n.pt"),
             os.path.join("gps_sta_model", "runs", "detect", "train", "weights", "best.pt"),
+            os.path.join("gps_sta_model", "weights", "best.pt"),
         ]
 
         self.model = None

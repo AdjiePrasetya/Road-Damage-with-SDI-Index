@@ -159,15 +159,24 @@ CONFIG = load_config()
 @st.cache_resource
 def load_models():
     logger.info("Memuat model deep learning & adapter...")
+    damage_cfg = CONFIG.get("models", {}).get("road_damage", {})
     damage_det = RoadDamageDetector(
-        conf_threshold=0.25,
+        cracks_model_path=damage_cfg.get("cracks_path", "road_damage_models/cracks/weights/best.pt"),
+        potholes_model_path=damage_cfg.get("potholes_path", "road_damage_models/potholes/weights/best.pt"),
+        rutting_model_path=damage_cfg.get("rutting_path", "road_damage_models/rutting/weights/best.pt"),
+        conf_threshold=damage_cfg.get("confidence_threshold", 0.25),
+        iou_threshold=damage_cfg.get("iou_threshold", 0.45),
         class_mapping=CONFIG.get("class_mapping", {}).get("road_damage", None)
     )
+    pave_cfg = CONFIG.get("models", {}).get("perkerasan_clf", {})
     pave_clf = PavementClassifier(
+        model_path=pave_cfg.get("primary_path", "perkerasan_clf_models/runs/perkerasan_cls/weights/best.pt"),
         class_mapping=CONFIG.get("class_mapping", {}).get("perkerasan", None)
     )
+    gps_cfg = CONFIG.get("models", {}).get("gps_sta", {})
     sta_est = StaEstimator(
-        default_speed_kmh=30.0
+        model_path=gps_cfg.get("model_path", "gps_sta_model/weights/yolo26n.pt"),
+        default_speed_kmh=gps_cfg.get("default_speed_kmh", 30.0)
     )
     return damage_det, pave_clf, sta_est
 
@@ -188,8 +197,6 @@ if "road_info" not in st.session_state:
         "road_name": "Jalan Ilyas Bedul",
         "road_width_m": 6.0,
         "base_segment_len": 100.0,
-        "crack_width_thresh": 3.0,
-        "default_rut_depth": 0.0
     }
 
 
@@ -230,30 +237,22 @@ with st.sidebar:
             help="Lebar perkerasan fisik jalan untuk kalkulasi luas retak dan kalibrasi otomatis"
         )
 
-    with st.expander("📏 Parameter Segmentasi & SDI", expanded=True):
+    with st.expander("📏 Parameter Segmentasi PKRMS", expanded=True):
         base_segment_len = st.number_input(
             "Panjang Blok Dasar (m)",
             value=100.0, step=25.0, min_value=25.0,
             help="Panjang standar segmen evaluasi PKRMS (Tabel 9: tiap 100 m)"
         )
-        crack_width_thresh = st.selectbox(
-            "Ambang Lebar Retak SDI2 (mm)",
-            options=[3.0, 5.0],
-            index=0,
-            help="Tabel 9 PKRMS menetapkan >3 mm. Narasi dokumen teks hal. 38 menyebutkan >5 mm."
-        )
-        default_rut_depth = st.number_input(
-            "Rata-rata Kedalaman Alur / Rutting (cm)",
-            value=0.0, step=0.5, min_value=0.0,
-            help="Input manual opsional karena rutting sulit diukur secara akurat dari video 2D."
-        )
 
     # Info Sistem Otomatis
     st.markdown("""
     <div class="auto-badge">
-        <strong>⚡ Otomasi Aktif:</strong><br>
-        • Nama jalan otomatis dari nama video.<br>
-        • Model <code>gps_sta_model/</code> menghitung jarak mandiri.<br>
+        <strong>⚡ Otomasi Penuh (Model AI Deep Learning):</strong><br>
+        • Nama ruas jalan otomatis dari nama file video.<br>
+        • Model <code>cracks/</code>: deteksi luas & lebar retak otomatis.<br>
+        • Model <code>potholes/</code>: deteksi & hitung lubang/km otomatis.<br>
+        • Model <code>rutting/</code>: prediksi kedalaman alur otomatis.<br>
+        • Model <code>gps_sta_model/</code>: hitung jarak & STA mandiri.<br>
         • Kalibrasi kamera & resolusi dihitung otomatis.
     </div>
     """, unsafe_allow_html=True)
@@ -268,9 +267,7 @@ with st.sidebar:
 st.session_state.road_info = {
     "road_name": road_name,
     "road_width_m": road_width,
-    "base_segment_len": base_segment_len,
-    "crack_width_thresh": crack_width_thresh,
-    "default_rut_depth": default_rut_depth
+    "base_segment_len": base_segment_len
 }
 
 
@@ -310,7 +307,7 @@ if process_btn:
             status_text.text(msg)
 
         try:
-            with st.spinner(f"Menganalisis video '{uploaded_video.name}' dengan Model GPS/STA & Kerusakan..."):
+            with st.spinner(f"Menganalisis video '{uploaded_video.name}' dengan 3 Model Segmentasi Kerusakan & GPS..."):
                 segs, previews, stats, out_vid_path = process_video_survey(
                     video_path=temp_video_path,
                     damage_detector=damage_det,
@@ -319,8 +316,6 @@ if process_btn:
                     road_name=road_name,
                     road_width_m=road_width,
                     base_segment_length_m=base_segment_len,
-                    crack_width_threshold_mm=crack_width_thresh,
-                    default_rut_depth_cm=default_rut_depth,
                     config=CONFIG,
                     progress_callback=update_progress
                 )
@@ -393,14 +388,16 @@ with tab_proses:
 
     st.markdown("---")
 
-    st.markdown("#### 🔍 Status Model AI & Adapter")
-    col_m1, col_m2, col_m3 = st.columns(3)
+    st.markdown("#### 🔍 Status Model AI & Segmentasi")
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
-        st.info("🤖 **Road Damage Detector:** YOLO RDD2022 (5 Kelas: Retak, Lubang, dll)")
+        st.info("⚡ **Cracks Seg:** `cracks/weights/best.pt` (<1mm, 1-3mm, >3mm)")
     with col_m2:
-        st.info("🛣️ **Pavement Classifier:** YOLO Classify (Hotmix, Lapen, Beton, dll)")
+        st.info("🕳️ **Potholes Seg:** `potholes/weights/best.pt` (Deteksi & Mask Lubang)")
     with col_m3:
-        st.info("📍 **Model GPS / STA:** Berjalan Mandiri Menggunakan `gps_sta_model/`")
+        st.info("📉 **Rutting Seg:** `rutting/weights/best.pt` (<1cm, 1-3cm, >3cm)")
+    with col_m4:
+        st.info("🛣️ **Pavement & GPS:** `perkerasan_cls` + `gps_sta_model/`")
 
     if st.session_state.preview_frames:
         st.markdown("#### 🖼️ Pratinjau Tangkapan Frame Resolusi Penuh")
@@ -418,7 +415,7 @@ with tab_proses:
             st.metric("STA Posisi", f"{selected_sample['sta_m']:.1f} m")
             st.metric("Jenis Perkerasan", selected_sample["pavement"])
             st.metric("Kerusakan Terdeteksi", f"{selected_sample['det_count']} objek")
-            st.caption("Kotak oranye: Kerusakan Retak • Kotak merah: Lubang (Pothole)")
+            st.caption("🟠 Kontur Poligon Retak • 🔴 Kontur Poligon Lubang • 🟣 Kontur Poligon Alur Rutting (Murni Segmentasi)")
 
 
 # ------------------------------------------------------------------------------
@@ -456,72 +453,26 @@ with tab_hasil:
         if filter_pave_choice != "Semua Perkerasan":
             filtered_segments = [s for s in filtered_segments if s.pavement_type == filter_pave_choice]
 
-        # RENDER TABEL HTML NATIVE (KEBAL TERHADAP CHUNK / CSS PRELOAD ERROR DI STREAMLIT CLOUD)
-        badge_classes = {
-            "Baik": "badge-baik",
-            "Sedang": "badge-sedang",
-            "Rusak Ringan": "badge-ringan",
-            "Rusak Berat": "badge-berat",
-        }
+        # Siapkan DataFrame terstruktur
+        df_table = segments_to_dataframe(filtered_segments, include_details=show_details)
 
-        th_extra = ""
-        if show_details:
-            th_extra = """
-                <th>% Luas Retak</th>
-                <th>Lebar Retak (mm)</th>
-                <th>Lubang/km</th>
-                <th>Alur (cm)</th>
-                <th>Status / Flag</th>
-            """
+        # Pewarnaan sel kolom Kondisi sesuai standar Bina Marga (Tabel 10)
+        def color_condition(val):
+            colors = {
+                "Baik": "background-color: #D4EDDA; color: #155724; font-weight: bold;",
+                "Sedang": "background-color: #FFF3CD; color: #856404; font-weight: bold;",
+                "Rusak Ringan": "background-color: #FFE5D0; color: #B35300; font-weight: bold;",
+                "Rusak Berat": "background-color: #F8D7DA; color: #721C24; font-weight: bold;",
+            }
+            return colors.get(val, "")
 
-        rows_html = ""
-        for s in filtered_segments:
-            b_class = badge_classes.get(s.condition, "badge-baik")
-            td_extra = ""
-            if show_details:
-                td_extra = f"""
-                    <td style="text-align: right;">{s.crack_area_pct:.2f}%</td>
-                    <td style="text-align: right;">{s.avg_crack_width_mm:.2f}</td>
-                    <td style="text-align: right;">{s.potholes_per_km:.1f}</td>
-                    <td style="text-align: right;">{s.rut_depth_cm:.1f}</td>
-                    <td style="text-align: center;"><small>{s.flag}</small></td>
-                """
+        # Tampilkan tabel data interaktif dengan pewarnaan kondisi
+        try:
+            styled_df = df_table.style.map(color_condition, subset=["Kondisi"])
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(df_table, use_container_width=True, hide_index=True)
 
-            rows_html += f"""
-            <tr>
-                <td><strong>{s.road_name}</strong></td>
-                <td style="text-align: center;">{s.sta_start:.0f} m</td>
-                <td style="text-align: center;">{s.sta_end:.0f} m</td>
-                <td style="text-align: center; font-weight: bold; font-size: 14px;">{s.sdi_value:.1f}</td>
-                <td style="text-align: center;">{s.pavement_type}</td>
-                <td style="text-align: center;"><span class="badge-cond {b_class}">{s.condition}</span></td>
-                <td>{s.recommendation}</td>
-                {td_extra}
-            </tr>
-            """
-
-        table_html = f"""
-        <div class="sdi-table-wrapper">
-            <table class="sdi-table">
-                <thead>
-                    <tr>
-                        <th>Nama Jalan</th>
-                        <th>STA Awal</th>
-                        <th>STA Akhir</th>
-                        <th>Nilai SDI</th>
-                        <th>Jenis Perkerasan</th>
-                        <th>Kondisi</th>
-                        <th>Saran Perbaikan</th>
-                        {th_extra}
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows_html}
-                </tbody>
-            </table>
-        </div>
-        """
-        st.markdown(table_html, unsafe_allow_html=True)
         st.caption(f"Menampilkan {len(filtered_segments)} dari total {len(segments)} segmen.")
 
         with st.expander("📖 Panduan & Logika Rumus SDI (Tabel 9 & 10 PKRMS)"):
@@ -801,7 +752,7 @@ with tab_koreksi:
             updated_segs = apply_manual_corrections(segments, overrides)
 
             road_w = st.session_state.road_info.get("road_width_m", 6.0)
-            crack_thresh = st.session_state.road_info.get("crack_width_thresh", 3.0)
+            crack_thresh = 3.0  # Standar Tabel 9 PKRMS (>3 mm)
 
             for seg in updated_segs:
                 surface_area = max(1.0, seg.length_m * road_w)

@@ -1,6 +1,7 @@
 """
 Modul Pipeline Pemrosesan Video Survei Jalan dengan Kalibrasi Otomatis
-dan Perekaman Video Hasil Inferensi (Web-Compatible H.264 MP4).
+dan Perekaman Video Hasil Inferensi Real-Time (1:1 Durasi & Kecepatan Normal, H.264 MP4).
+Terintegrasi dengan 3 Model Segmentasi Terbaru (Cracks, Potholes, Rutting Otomatis).
 """
 import os
 import cv2
@@ -35,11 +36,11 @@ def calculate_iou(boxA: List[float], boxB: List[float]) -> float:
 
 class SimpleDamageTracker:
     """
-    Tracker sederhana untuk menduplikasi objek kerusakan antar frame berurutan.
-    Menghindari penghitungan ganda (double-counting) lubang & retak yang muncul di frame beruntun.
+    Tracker untuk menduplikasi objek kerusakan antar frame berurutan.
+    Menghindari penghitungan ganda (double-counting) retak, lubang, & alur yang muncul beruntun.
     """
 
-    def __init__(self, iou_threshold: float = 0.25, max_age: int = 5):
+    def __init__(self, iou_threshold: float = 0.25, max_age: int = 8):
         self.iou_threshold = iou_threshold
         self.max_age = max_age
         self.next_id = 1
@@ -81,6 +82,8 @@ class SimpleDamageTracker:
                 self.tracks[best_tid]["age"] = 0
                 self.tracks[best_tid]["last_seen_frame"] = frame_idx
                 self.tracks[best_tid]["area_m2"] = max(self.tracks[best_tid]["area_m2"], det["area_m2"])
+                if det.get("polygon") is not None:
+                    self.tracks[best_tid]["polygon"] = det["polygon"]
                 det["track_id"] = best_tid
                 det["is_new"] = False
             else:
@@ -93,6 +96,7 @@ class SimpleDamageTracker:
                     "age": 0,
                     "last_seen_frame": frame_idx,
                     "area_m2": det["area_m2"],
+                    "polygon": det.get("polygon"),
                 }
                 matched_track_ids.add(new_id)
                 det["track_id"] = new_id
@@ -112,58 +116,86 @@ def draw_annotations(
     annotated = frame.copy()
     h, w = annotated.shape[:2]
 
+    # Palet warna kategori SDI (BGR)
     colors = {
-        "crack": (0, 165, 255),      # Oranye BGR
-        "pothole": (0, 0, 255),      # Merah BGR
-        "other": (200, 200, 200),    # Abu-abu
+        "crack": (0, 165, 255),      # Oranye (Retak)
+        "pothole": (0, 0, 255),      # Merah (Lubang)
+        "rutting": (255, 0, 200),    # Magenta (Alur/Rutting)
+        "other": (200, 200, 200),
     }
 
-    for det in detections:
-        bbox = det["bbox"]
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-        cat = det.get("sdi_category", "other")
-        color = colors.get(cat, (255, 255, 255))
-        tid = det.get("track_id", "?")
+    # Overlay mask semi-transparan untuk hasil segmentasi murni
+    overlay = annotated.copy()
+    has_any_poly = False
 
-        # Gambar Bounding Box
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+    for det in detections:
+        cat = det.get("sdi_category", "other")
+        color = colors.get(cat, (0, 255, 0))
+        tid = det.get("track_id", "?")
         label_txt = f"ID:{tid} {det['class']} ({det['conf']:.2f})"
-        (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(annotated, (x1, max(0, y1 - th - 6)), (x1 + tw, y1), color, -1)
-        cv2.putText(
-            annotated, label_txt, (x1, max(th, y1 - 4)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA
-        )
+
+        polygon = det.get("polygon")
+        if polygon is not None and len(polygon) >= 3:
+            pts = np.int32(polygon).reshape((-1, 1, 2))
+            # 1. Fill mask semi-transparan (Segmentasi)
+            cv2.fillPoly(overlay, [pts], color)
+            # 2. Garis kontur tepi segmentasi mengikuti lekuk riil kerusakan jalan (Tanpa Kotak Bounding Box)
+            cv2.polylines(annotated, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
+            has_any_poly = True
+
+            # Titik posisi label tag di bagian atas kontur
+            min_y = int(np.min(pts[:, 0, 1]))
+            min_x = int(np.min(pts[:, 0, 0]))
+            label_pos_x = max(5, min(w - 180, min_x))
+            label_pos_y = max(22, min_y - 6)
+
+            (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(annotated, (label_pos_x, label_pos_y - th - 4), (label_pos_x + tw + 6, label_pos_y + 2), color, -1)
+            cv2.putText(annotated, label_txt, (label_pos_x + 3, label_pos_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        else:
+            # Fallback jika polygon belum tersedia: gunakan bentuk oval/elips halus (bukan kotak kaku)
+            bbox = det.get("bbox")
+            if bbox:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                rx, ry = max(6, (x2 - x1) // 2), max(6, (y2 - y1) // 2)
+                cv2.ellipse(overlay, (cx, cy), (rx, ry), 0, 0, 360, color, -1)
+                cv2.ellipse(annotated, (cx, cy), (rx, ry), 0, 0, 360, color, 2, cv2.LINE_AA)
+                has_any_poly = True
+
+                (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(annotated, (x1, max(0, y1 - th - 6)), (x1 + tw + 6, y1), color, -1)
+                cv2.putText(annotated, label_txt, (x1 + 3, max(th, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+
+    if has_any_poly:
+        cv2.addWeighted(overlay, 0.40, annotated, 0.60, 0, annotated)
 
     # HUD Banner bagian atas
     cv2.rectangle(annotated, (0, 0), (w, 48), (20, 20, 20), -1)
     sta_text = f"STA: {sta_info.get('sta_m', 0.0):.1f} m"
-    pave_text = f"Perkerasan: {pavement_info.get('label', 'Unknown')} ({pavement_info.get('conf', 0.0)*100:.0f}%)"
-    det_text = f"Deteksi: {len(detections)} kerusakan"
+    pave_text = f"Perkerasan: {pavement_info.get('label', 'Unknown')}"
+    det_text = f"Kerusakan: {len(detections)} segmen"
     full_hud = f"{sta_text}  |  {pave_text}  |  {det_text}"
-    cv2.putText(annotated, full_hud, (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(annotated, full_hud, (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
 
     return annotated
 
 
-def convert_to_web_h264(input_path: str, output_path: str) -> bool:
-    """
-    Mengonversi video ke format H.264 YUV420P menggunakan ffmpeg
-    agar dapat diputar lancar langsung di HTML5 video player browser.
-    """
+def convert_to_web_h264(input_path: str, output_path: str, target_fps: float = 30.0) -> bool:
+    """Mengonversi video ke format H.264 YUV420P menggunakan ffmpeg."""
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        # Fallback jika ffmpeg tidak ditemukan di PATH
         shutil.copy(input_path, output_path)
         return False
 
     cmd = [
         ffmpeg_bin, "-y",
         "-i", input_path,
+        "-r", str(round(target_fps, 2)),
         "-vcodec", "libx264",
         "-pix_fmt", "yuv420p",
-        "-preset", "fast",
-        "-crf", "24",
+        "-preset", "veryfast",
+        "-crf", "23",
         output_path
     ]
     try:
@@ -184,17 +216,15 @@ def process_video_survey(
     road_width_m: float = 6.0,
     base_segment_length_m: float = 100.0,
     crack_width_threshold_mm: float = 3.0,
-    default_rut_depth_cm: float = 0.0,
     output_video_path: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Any] = None
 ) -> Tuple[List[RoadSegment], List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
     """
-    Menjalankan alur lengkap pemrosesan video survei dengan KALIBRASI OTOMATIS
-    dan pembuatan file video hasil inferensi beranotasi lengkap.
-
-    Mengembalikan:
-      (segments, preview_frames, stats, final_annotated_video_path)
+    Menjalankan alur pemrosesan video survei:
+    - 3 Model Segmentasi Aktif: Cracks, Potholes, Rutting (Otomatis).
+    - Durasi video output 1:1 SAMA PERSIS dengan durasi video asli (kecepatan normal 1x, tidak dilajukan).
+    - Kedalaman alur (rutting) dihitung otomatis oleh AI tanpa input manual manusia.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -205,24 +235,27 @@ def process_video_survey(
     w_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
     h_orig = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-    auto_frame_step = auto_calculate_frame_step(fps)
+    infer_step = max(3, min(int(round(fps * 0.33)), 15))
 
-    tracker = SimpleDamageTracker(iou_threshold=0.25, max_age=5)
+    tracker = SimpleDamageTracker(iou_threshold=0.25, max_age=infer_step * 2)
     frame_records: List[FrameRecord] = []
     preview_frames: List[Dict[str, Any]] = []
 
-    # Siapkan VideoWriter untuk merekam video hasil inferensi
-    raw_video_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    
-    # Hitung FPS output untuk video beranotasi (berjalan proporsional dengan sampling)
-    out_fps = max(5.0, fps / float(auto_frame_step))
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(raw_video_tmp, fourcc, out_fps, (w_orig, h_orig))
+    # Map untuk melacak estimasi rutting kedalaman per frame
+    frame_rut_depths: Dict[int, float] = {}
 
-    processed_count = 0
+    raw_video_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+
+    # VideoWriter menggunakan FPS asli 1:1
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    video_writer = cv2.VideoWriter(raw_video_tmp, fourcc, fps, (w_orig, h_orig))
+
     frame_idx = 0
     is_calibrated = False
     calib_info = {}
+
+    active_detections: List[Dict[str, Any]] = []
+    active_pavement: Dict[str, Any] = {"label": "Hotmix", "conf": 1.0}
 
     while True:
         ret, frame = cap.read()
@@ -234,34 +267,39 @@ def process_video_survey(
             if hasattr(damage_detector, "update_auto_calibration"):
                 damage_detector.update_auto_calibration(
                     meter_per_pixel=calib_info["meter_per_pixel"],
-                    crack_area_factors=calib_info["crack_area_factors"]
+                    crack_area_factors=calib_info.get("crack_area_factors")
                 )
             is_calibrated = True
 
-        if frame_idx % auto_frame_step == 0:
-            sta_res = sta_estimator.predict(frame=frame, frame_idx=frame_idx, fps=fps)
-            sta_m = sta_res["sta_m"]
+        sta_res = sta_estimator.predict(frame=frame, frame_idx=frame_idx, fps=fps)
+        sta_m = sta_res["sta_m"]
 
-            pave_res = pavement_classifier.predict(frame)
-            pavement_label = pave_res["label"]
-            pavement_conf = pave_res["conf"]
-
+        if frame_idx % infer_step == 0:
+            active_pavement = pavement_classifier.predict(frame)
             raw_dets = damage_detector.predict(frame)
-            tracked_dets = tracker.update(raw_dets, frame_idx)
+            active_detections = tracker.update(raw_dets, frame_idx)
 
-            pothole_tids = [d["track_id"] for d in tracked_dets if d["sdi_category"] == "pothole"]
+            # Lubang (potholes)
+            pothole_tids = [d["track_id"] for d in active_detections if d["sdi_category"] == "pothole"]
+
+            # Retak baru (cracks area & lebar)
             new_crack_m2 = sum(
-                d["area_m2"] for d in tracked_dets 
+                d["area_m2"] for d in active_detections 
                 if d["sdi_category"] == "crack" and d.get("is_new", False)
             )
-            crack_widths = [d["width_mm"] for d in tracked_dets if d["sdi_category"] == "crack"]
+            crack_widths = [d["width_mm"] for d in active_detections if d["sdi_category"] == "crack" and d.get("width_mm", 0) > 0]
             avg_width = float(np.mean(crack_widths)) if crack_widths else 0.0
+
+            # Alur (rutting) OTOMATIS DARI MODEL
+            rut_depths = [d.get("rut_depth_cm", 0.0) for d in active_detections if d["sdi_category"] == "rutting"]
+            max_frame_rut = max(rut_depths) if rut_depths else 0.0
+            frame_rut_depths[frame_idx] = max_frame_rut
 
             rec = FrameRecord(
                 frame_idx=frame_idx,
                 sta_m=sta_m,
-                pavement_type=pavement_label,
-                pavement_conf=pavement_conf,
+                pavement_type=active_pavement["label"],
+                pavement_conf=active_pavement["conf"],
                 crack_area_m2=new_crack_m2,
                 crack_width_mm=avg_width,
                 pothole_ids=pothole_tids,
@@ -270,34 +308,30 @@ def process_video_survey(
             )
             frame_records.append(rec)
 
-            # Gambar anotasi untuk frame video inferensi
-            annotated_frame = draw_annotations(frame, tracked_dets, pave_res, sta_res)
-            video_writer.write(annotated_frame)
-
-            # Sampel preview gambar untuk UI
             if len(preview_frames) < 10 or (len(raw_dets) > 0 and len(preview_frames) < 20):
-                rgb_img = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                sample_annotated = draw_annotations(frame, active_detections, active_pavement, sta_res)
                 preview_frames.append({
                     "frame_idx": frame_idx,
                     "sta_m": sta_m,
-                    "image": rgb_img,
-                    "det_count": len(tracked_dets),
-                    "pavement": pavement_label
+                    "image": cv2.cvtColor(sample_annotated, cv2.COLOR_BGR2RGB),
+                    "det_count": len(active_detections),
+                    "pavement": active_pavement["label"]
                 })
 
-            processed_count += 1
-            if progress_callback and total_frames > 0:
-                prog = min(1.0, frame_idx / total_frames)
-                progress_callback(prog, f"Menganalisis & merekam video inferensi (STA {sta_m:.1f} m)...")
+        annotated_frame = draw_annotations(frame, active_detections, active_pavement, sta_res)
+        video_writer.write(annotated_frame)
+
+        if progress_callback and total_frames > 0 and frame_idx % 15 == 0:
+            prog = min(1.0, frame_idx / total_frames)
+            progress_callback(prog, f"Memproses video durasi normal (Frame {frame_idx}/{total_frames} • STA {sta_m:.1f} m)...")
 
         frame_idx += 1
 
     cap.release()
     video_writer.release()
 
-    # Konversi video ke H.264 web compatible
     final_video_path = output_video_path or tempfile.NamedTemporaryFile(delete=False, suffix="_web.mp4").name
-    convert_to_web_h264(raw_video_tmp, final_video_path)
+    convert_to_web_h264(raw_video_tmp, final_video_path, target_fps=fps)
     if os.path.exists(raw_video_tmp):
         try:
             os.remove(raw_video_tmp)
@@ -307,7 +341,7 @@ def process_video_survey(
     if not frame_records:
         return [], preview_frames, {"total_frames": total_frames, "processed_frames": 0}, None
 
-    # Segmentasi Ruas
+    # Segmentasi Ruas PKRMS
     segments = create_segments_from_frames(
         frames=frame_records,
         road_name=road_name,
@@ -318,26 +352,36 @@ def process_video_survey(
         min_run_length=3
     )
 
-    # Perhitungan SDI per Segmen
+    # Perhitungan SDI per Segmen Sesuai Panduan PKRMS Tabel 9 & 10
     for seg in segments:
         seg_frames = [frame_records[i] for i in seg.frame_indices if i < len(frame_records)]
 
+        # Level 1: % Luas Retak (dari mask polygon riil)
         total_crack_area_m2 = sum(f.crack_area_m2 for f in seg_frames)
         surface_area_m2 = max(1.0, seg.length_m * road_width_m)
         crack_area_pct = min(100.0, (total_crack_area_m2 / surface_area_m2) * 100.0)
 
+        # Level 2: Lebar Retak (dari kelas model crack_lt_1mm, crack_1_3mm, crack_gt_3mm)
         widths = [f.crack_width_mm for f in seg_frames if f.crack_width_mm > 0]
         avg_crack_width = float(np.mean(widths)) if widths else 0.0
 
+        # Level 3: Lubang unik per km
         unique_potholes = len(set(pid for f in seg_frames for pid in f.pothole_ids))
         potholes_per_km = (unique_potholes * 1000.0) / max(1.0, seg.length_m)
-        rut_cm = seg.rut_depth_cm if seg.rut_depth_cm > 0 else default_rut_depth_cm
+
+        # Level 4: KEDALAMAN ALUR OTOMATIS DARI MODEL RUTTING
+        seg_rut_depths = [frame_rut_depths.get(f.frame_idx, 0.0) for f in seg_frames if frame_rut_depths.get(f.frame_idx, 0.0) > 0]
+        if seg_rut_depths:
+            # Gunakan nilai representatif alur terdeteksi
+            auto_rut_depth_cm = float(np.percentile(seg_rut_depths, 75))
+        else:
+            auto_rut_depth_cm = 0.0
 
         sdi_calc = calculate_sdi(
             crack_area_pct=crack_area_pct,
             avg_crack_width_mm=avg_crack_width,
             potholes_per_km=potholes_per_km,
-            rut_depth_cm=rut_cm,
+            rut_depth_cm=auto_rut_depth_cm,
             crack_width_threshold_mm=crack_width_threshold_mm,
             config=config
         )
@@ -355,7 +399,7 @@ def process_video_survey(
         seg.crack_area_pct = round(crack_area_pct, 2)
         seg.avg_crack_width_mm = round(avg_crack_width, 2)
         seg.potholes_per_km = round(potholes_per_km, 2)
-        seg.rut_depth_cm = round(rut_cm, 2)
+        seg.rut_depth_cm = round(auto_rut_depth_cm, 2)
         seg.unique_potholes = unique_potholes
         seg.total_crack_area_m2 = round(total_crack_area_m2, 3)
         seg.recommendation = full_rec
@@ -363,7 +407,7 @@ def process_video_survey(
     total_len = sum(s.length_m for s in segments)
     stats = {
         "total_frames": total_frames,
-        "processed_frames": processed_count,
+        "processed_frames": len(frame_records),
         "fps": round(fps, 1),
         "total_segments": len(segments),
         "total_length_m": round(total_len, 1),
