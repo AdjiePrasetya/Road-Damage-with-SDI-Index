@@ -10,6 +10,7 @@ import cv2
 import logging
 from typing import List, Dict, Any, Optional
 import numpy as np
+from core.device import get_optimal_device
 
 try:
     from ultralytics import YOLO
@@ -33,7 +34,7 @@ class RoadDamageDetector:
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         imgsz: int = 640,
-        device: str = "cpu",
+        device: str = "auto",
         meter_per_pixel: float = 0.005,
         class_mapping: Optional[Dict[str, str]] = None,
         **kwargs
@@ -41,8 +42,10 @@ class RoadDamageDetector:
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
-        self.device = device
         self.meter_per_pixel = meter_per_pixel
+
+        # Deteksi & prioritaskan GPU NVIDIA secara otomatis
+        self.device, self.device_info = get_optimal_device(device)
 
         self.class_mapping = class_mapping or {
             "crack_lt_1mm": "crack",

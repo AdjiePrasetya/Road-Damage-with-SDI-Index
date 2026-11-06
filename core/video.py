@@ -5,11 +5,14 @@ Terintegrasi dengan 3 Model Segmentasi Terbaru (Cracks, Potholes, Rutting Otomat
 """
 import os
 import cv2
+import torch
 import subprocess
 import shutil
 import tempfile
 import numpy as np
 import logging
+import threading
+import queue
 from typing import List, Dict, Any, Optional, Tuple
 from .segmentation import FrameRecord, RoadSegment, create_segments_from_frames
 from .sdi import calculate_sdi
@@ -181,28 +184,103 @@ def draw_annotations(
     return annotated
 
 
+class AsyncVideoWriter:
+    """
+    Perekam video asinkron multi-threading berbasis antrean (Queue).
+    Memisahkan operasi I/O penulisan frame ke disk dari loop inferensi GPU
+    sehingga GPU tidak pernah terhambat oleh kecepatan penulisan disk.
+    """
+
+    def __init__(
+        self,
+        filename: str,
+        fourcc: int,
+        fps: float,
+        frame_size: Tuple[int, int],
+        queue_size: int = 128
+    ):
+        self.filename = filename
+        self.writer = cv2.VideoWriter(filename, fourcc, fps, frame_size)
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stopped = False
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def _worker(self):
+        while True:
+            frame = self.queue.get()
+            if frame is None:
+                self.queue.task_done()
+                break
+            try:
+                self.writer.write(frame)
+            except Exception as e:
+                logger.error(f"Error menulis frame video: {e}")
+            self.queue.task_done()
+
+    def write(self, frame: np.ndarray) -> None:
+        if not self.stopped:
+            try:
+                self.queue.put(frame, block=True, timeout=5.0)
+            except queue.Full:
+                logger.warning("Antrean video writer penuh, frame dilewati.")
+
+    def release(self) -> None:
+        self.stopped = True
+        try:
+            self.queue.put(None, timeout=2.0)
+            self.thread.join(timeout=10.0)
+        except Exception:
+            pass
+        self.writer.release()
+
+
 def convert_to_web_h264(input_path: str, output_path: str, target_fps: float = 30.0) -> bool:
-    """Mengonversi video ke format H.264 YUV420P menggunakan ffmpeg."""
+    """Mengonversi video ke format H.264 web-ready dengan akselerasi GPU NVENC jika tersedia."""
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
         shutil.copy(input_path, output_path)
         return False
 
-    cmd = [
-        ffmpeg_bin, "-y",
-        "-i", input_path,
-        "-r", str(round(target_fps, 2)),
-        "-vcodec", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-preset", "veryfast",
-        "-crf", "23",
-        output_path
-    ]
+    has_nvenc = False
+    try:
+        chk = subprocess.run([ffmpeg_bin, "-encoders"], capture_output=True, text=True, timeout=5)
+        if "h264_nvenc" in chk.stdout:
+            has_nvenc = True
+    except Exception:
+        pass
+
+    if has_nvenc and torch.cuda.is_available():
+        # GPU NVENC encoding super cepat (200+ FPS) dengan kompresi optimal
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", input_path,
+            "-r", str(round(target_fps, 2)),
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", "26",
+            "-pix_fmt", "yuv420p",
+            output_path
+        ]
+    else:
+        # CPU libx264 encoding dengan multi-threading maksimal
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", input_path,
+            "-r", str(round(target_fps, 2)),
+            "-c:v", "libx264",
+            "-preset", "faster",
+            "-crf", "26",
+            "-pix_fmt", "yuv420p",
+            "-threads", str(os.cpu_count() or 8),
+            output_path
+        ]
+
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
     except Exception as e:
-        logger.warning(f"Gagal convert ffmpeg h264: {e}. Menggunakan file asli.")
+        logger.warning(f"Gagal convert ffmpeg: {e}. Menggunakan file mentah.")
         shutil.copy(input_path, output_path)
         return False
 
@@ -223,8 +301,9 @@ def process_video_survey(
     """
     Menjalankan alur pemrosesan video survei:
     - 3 Model Segmentasi Aktif: Cracks, Potholes, Rutting (Otomatis).
-    - Durasi video output 1:1 SAMA PERSIS dengan durasi video asli (kecepatan normal 1x, tidak dilajukan).
-    - Kedalaman alur (rutting) dihitung otomatis oleh AI tanpa input manual manusia.
+    - Akselerasi GPU NVIDIA (CUDA) diprioritaskan penuh, atau utilisasi CPU maksimal jika tanpa GPU.
+    - Resolusi dan encoding video dioptimalkan agar ringan dan bebas MemoryError.
+    - Video hasil disimpan permanen di folder lokal 'output_survei/'.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -234,6 +313,16 @@ def process_video_survey(
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     w_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
     h_orig = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+
+    # Optimasi dimensi output: Batasi maks 1280px agar hemat memori RAM dan ukuran file ringan
+    out_w, out_h = w_orig, h_orig
+    max_dim = 1280
+    if max(w_orig, h_orig) > max_dim:
+        scale = max_dim / float(max(w_orig, h_orig))
+        out_w = int(w_orig * scale)
+        out_h = int(h_orig * scale)
+        out_w = out_w if out_w % 2 == 0 else out_w - 1
+        out_h = out_h if out_h % 2 == 0 else out_h - 1
 
     infer_step = max(3, min(int(round(fps * 0.33)), 15))
 
@@ -246,9 +335,17 @@ def process_video_survey(
 
     raw_video_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
 
-    # VideoWriter menggunakan FPS asli 1:1
+    # VideoWriter asinkron menggunakan resolusi yang dioptimalkan
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(raw_video_tmp, fourcc, fps, (w_orig, h_orig))
+    video_writer = AsyncVideoWriter(raw_video_tmp, fourcc, fps, (out_w, out_h))
+
+    # Pemanasan model GPU (Warm-up) agar CUDA kernel siap sebelum loop inferensi
+    if torch.cuda.is_available():
+        try:
+            from core.device import warmup_gpu_models
+            warmup_gpu_models([damage_detector, pavement_classifier, sta_estimator])
+        except Exception:
+            pass
 
     frame_idx = 0
     is_calibrated = False
@@ -262,6 +359,11 @@ def process_video_survey(
         if not ret:
             break
 
+        # Optimasi Kinerja GPU/CPU: Resize langsung di awal jika dimensi asli > 1280px
+        # Menghilangkan beban redundansi penggambaran dan komputasi di CPU
+        if (w_orig, h_orig) != (out_w, out_h):
+            frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
         if not is_calibrated and frame is not None:
             calib_info = auto_calibrate_camera(frame.shape, road_width_m=road_width_m)
             if hasattr(damage_detector, "update_auto_calibration"):
@@ -271,7 +373,9 @@ def process_video_survey(
                 )
             is_calibrated = True
 
-        sta_res = sta_estimator.predict(frame=frame, frame_idx=frame_idx, fps=fps)
+        # Akselerasi STA: Hanya inferensi model visual pada keyframe, posisi kumulatif dihitung instan setiap frame
+        frame_for_sta = frame if (frame_idx % infer_step == 0) else None
+        sta_res = sta_estimator.predict(frame=frame_for_sta, frame_idx=frame_idx, fps=fps)
         sta_m = sta_res["sta_m"]
 
         if frame_idx % infer_step == 0:
@@ -308,18 +412,17 @@ def process_video_survey(
             )
             frame_records.append(rec)
 
-            if len(preview_frames) < 10 or (len(raw_dets) > 0 and len(preview_frames) < 20):
-                sample_annotated = draw_annotations(frame, active_detections, active_pavement, sta_res)
-                preview_frames.append({
-                    "frame_idx": frame_idx,
-                    "sta_m": sta_m,
-                    "image": cv2.cvtColor(sample_annotated, cv2.COLOR_BGR2RGB),
-                    "det_count": len(active_detections),
-                    "pavement": active_pavement["label"]
-                })
-
         annotated_frame = draw_annotations(frame, active_detections, active_pavement, sta_res)
         video_writer.write(annotated_frame)
+
+        if frame_idx % infer_step == 0 and (len(preview_frames) < 10 or (len(active_detections) > 0 and len(preview_frames) < 20)):
+            preview_frames.append({
+                "frame_idx": frame_idx,
+                "sta_m": sta_m,
+                "image": cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB),
+                "det_count": len(active_detections),
+                "pavement": active_pavement["label"]
+            })
 
         if progress_callback and total_frames > 0 and frame_idx % 15 == 0:
             prog = min(1.0, frame_idx / total_frames)
@@ -330,7 +433,13 @@ def process_video_survey(
     cap.release()
     video_writer.release()
 
-    final_video_path = output_video_path or tempfile.NamedTemporaryFile(delete=False, suffix="_web.mp4").name
+    # Simpan hasil video permanen di folder lokal project 'output_survei/'
+    output_dir = os.path.abspath("output_survei")
+    os.makedirs(output_dir, exist_ok=True)
+    clean_road = "".join(c for c in road_name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+    default_out_path = os.path.join(output_dir, f"Hasil_Survei_{clean_road}.mp4")
+    final_video_path = output_video_path or default_out_path
+
     convert_to_web_h264(raw_video_tmp, final_video_path, target_fps=fps)
     if os.path.exists(raw_video_tmp):
         try:

@@ -8,6 +8,7 @@ import os
 import logging
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
+from core.device import get_optimal_device
 
 try:
     from ultralytics import YOLO
@@ -30,11 +31,13 @@ class StaEstimator:
         sta_start_m: float = 0.0,
         default_speed_kmh: float = 30.0,
         gps_start_coord: Optional[Tuple[float, float]] = None,
+        device: str = "auto",
         **kwargs
     ):
         self.sta_start_m = sta_start_m
         self.default_speed_kmh = default_speed_kmh
         self.gps_start_coord = gps_start_coord or (-6.2088, 106.8456)
+        self.device, self.device_info = get_optimal_device(device)
 
         target_path = model_path or weights_path
         # Path model dari folder gps_sta_model/
@@ -54,7 +57,7 @@ class StaEstimator:
                     try:
                         self.model = YOLO(p)
                         self.model_loaded_path = p
-                        logger.info(f"Berhasil memuat model StaEstimator dari: {p}")
+                        logger.info(f"Berhasil memuat model StaEstimator dari: {p} (Device: {self.device})")
                         break
                     except Exception as e:
                         logger.warning(f"Gagal memuat model GPS/STA dari {p}: {e}")
@@ -62,6 +65,7 @@ class StaEstimator:
         self._last_known_sta = self.sta_start_m
         self._last_known_lat = self.gps_start_coord[0]
         self._last_known_lon = self.gps_start_coord[1]
+        self._last_features_count = 0
 
     def predict(
         self,
@@ -73,24 +77,27 @@ class StaEstimator:
         """
         Menghasilkan perkiraan STA (jarak meter dari titik awal) dan koordinat GPS
         secara mandiri menggunakan model gps_sta_model dan integrasi waktu frame.
+        Akselerasi GPU aktif saat frame dioper.
         """
         fps_val = max(1.0, fps)
         t_sec = current_time_s if current_time_s is not None else (frame_idx / fps_val)
 
-        # Jalankan inferensi model gps_sta jika frame tersedia
-        detected_features_count = 0
+        # Jalankan inferensi model gps_sta dengan akselerasi GPU/CPU maksimal
+        detected_features_count = self._last_features_count
         if self.model is not None and frame is not None:
             try:
                 results = self.model.predict(
                     source=frame,
                     conf=0.25,
                     imgsz=320,
+                    device=self.device,
                     verbose=False
                 )
                 if results and len(results) > 0:
                     boxes = getattr(results[0], "boxes", None)
                     if boxes is not None:
                         detected_features_count = len(boxes)
+                        self._last_features_count = detected_features_count
             except Exception as e:
                 logger.debug(f"Inferensi model gps_sta: {e}")
 

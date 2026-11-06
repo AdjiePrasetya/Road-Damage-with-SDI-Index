@@ -8,6 +8,7 @@ Dioptimalkan untuk Deployment Streamlit Cloud (Bebas Chunk Error & Cache Mismatc
 import os
 import yaml
 import tempfile
+import subprocess
 import logging
 import streamlit as st
 import pandas as pd
@@ -17,6 +18,7 @@ import plotly.graph_objects as go
 import pydeck as pdk
 
 # Import modul core dan model adapter
+from core.device import get_optimal_device
 from core.sdi import calculate_sdi, classify_sdi_condition
 from core.segmentation import RoadSegment, apply_manual_corrections
 from core.recommendation import get_recommendation
@@ -160,23 +162,27 @@ CONFIG = load_config()
 def load_models():
     logger.info("Memuat model deep learning & adapter...")
     damage_cfg = CONFIG.get("models", {}).get("road_damage", {})
+    pave_cfg = CONFIG.get("models", {}).get("perkerasan_clf", {})
+    gps_cfg = CONFIG.get("models", {}).get("gps_sta", {})
+
     damage_det = RoadDamageDetector(
         cracks_model_path=damage_cfg.get("cracks_path", "road_damage_models/cracks/weights/best.pt"),
         potholes_model_path=damage_cfg.get("potholes_path", "road_damage_models/potholes/weights/best.pt"),
         rutting_model_path=damage_cfg.get("rutting_path", "road_damage_models/rutting/weights/best.pt"),
         conf_threshold=damage_cfg.get("confidence_threshold", 0.25),
         iou_threshold=damage_cfg.get("iou_threshold", 0.45),
+        device=damage_cfg.get("device", "auto"),
         class_mapping=CONFIG.get("class_mapping", {}).get("road_damage", None)
     )
-    pave_cfg = CONFIG.get("models", {}).get("perkerasan_clf", {})
     pave_clf = PavementClassifier(
         model_path=pave_cfg.get("primary_path", "perkerasan_clf_models/runs/perkerasan_cls/weights/best.pt"),
+        device=pave_cfg.get("device", "auto"),
         class_mapping=CONFIG.get("class_mapping", {}).get("perkerasan", None)
     )
-    gps_cfg = CONFIG.get("models", {}).get("gps_sta", {})
     sta_est = StaEstimator(
         model_path=gps_cfg.get("model_path", "gps_sta_model/weights/yolo26n.pt"),
-        default_speed_kmh=gps_cfg.get("default_speed_kmh", 30.0)
+        default_speed_kmh=gps_cfg.get("default_speed_kmh", 30.0),
+        device=gps_cfg.get("device", "auto")
     )
     return damage_det, pave_clf, sta_est
 
@@ -191,10 +197,10 @@ if "survey_stats" not in st.session_state:
 if "annotated_video_path" not in st.session_state:
     st.session_state.annotated_video_path = None
 if "detected_road_name" not in st.session_state:
-    st.session_state.detected_road_name = "Jalan Ilyas Bedul"
+    st.session_state.detected_road_name = ""
 if "road_info" not in st.session_state:
     st.session_state.road_info = {
-        "road_name": "Jalan Ilyas Bedul",
+        "road_name": "",
         "road_width_m": 6.0,
         "base_segment_len": 100.0,
     }
@@ -237,6 +243,7 @@ with st.sidebar:
     elif local_video_path and os.path.exists(local_video_path):
         active_video_name = os.path.basename(local_video_path)
 
+    clean_name = ""
     if active_video_name:
         raw_name = os.path.splitext(active_video_name)[0]
         clean_name = raw_name.replace("_", " ").replace("-", " ").strip().title()
@@ -246,7 +253,8 @@ with st.sidebar:
         road_name = st.text_input(
             "Nama Ruas Jalan",
             value=st.session_state.detected_road_name,
-            help="Otomatis diambil dari nama file video yang diunggah"
+            placeholder="Belum ada video (otomatis terisi saat video dimasukkan)",
+            help="Otomatis diambil dari nama file video yang diunggah, atau isi manual jika diperlukan"
         )
         road_width = st.number_input(
             "Lebar Jalan (m)",
@@ -284,7 +292,7 @@ with st.sidebar:
 
 # Simpan info ke state
 st.session_state.road_info = {
-    "road_name": road_name,
+    "road_name": road_name.strip(),
     "road_width_m": road_width,
     "base_segment_len": base_segment_len
 }
@@ -294,9 +302,12 @@ st.session_state.road_info = {
 # LOGIKA AKSI: PROSES VIDEO & DEMO MODE
 # ==============================================================================
 if demo_btn:
-    with st.spinner("Memuat data demo survei realistis & menyiapkan video inferensi..."):
+    demo_road_name = road_name.strip() if road_name.strip() else "Jalan Ilyas Bedul (Demo)"
+    st.session_state.detected_road_name = demo_road_name
+    st.session_state.road_info["road_name"] = demo_road_name
+    with st.spinner(f"Memuat data demo survei realistis untuk '{demo_road_name}' & menyiapkan video inferensi..."):
         demo_segs, demo_previews, demo_stats, demo_video_path = generate_demo_survey_data(
-            road_name=road_name,
+            road_name=demo_road_name,
             sta_start=0.0,
             road_width_m=road_width,
             config=CONFIG
@@ -305,7 +316,7 @@ if demo_btn:
         st.session_state.preview_frames = demo_previews
         st.session_state.survey_stats = demo_stats
         st.session_state.annotated_video_path = demo_video_path
-        st.success(f"✅ Mode Demo dimuat untuk {road_name}! Video inferensi siap ditonton dan diunduh.")
+        st.success(f"✅ Mode Demo dimuat untuk {demo_road_name}! Video inferensi siap ditonton dan diunduh.")
 
 if process_btn:
     video_source_path = None
@@ -333,6 +344,10 @@ if process_btn:
         st.error("⚠️ Silakan upload file video survei, masukkan path file video lokal yang valid, atau klik tombol 'Jalankan Demo'.")
 
     if video_source_path:
+        exec_road_name = road_name.strip() if road_name.strip() else (clean_name if active_video_name else "Ruas Jalan")
+        st.session_state.detected_road_name = exec_road_name
+        st.session_state.road_info["road_name"] = exec_road_name
+
         damage_det, pave_clf, sta_est = load_models()
 
         progress_bar = st.progress(0.0)
@@ -349,7 +364,7 @@ if process_btn:
                     damage_detector=damage_det,
                     pavement_classifier=pave_clf,
                     sta_estimator=sta_est,
-                    road_name=road_name,
+                    road_name=exec_road_name,
                     road_width_m=road_width,
                     base_segment_length_m=base_segment_len,
                     config=CONFIG,
@@ -360,7 +375,7 @@ if process_btn:
                 st.session_state.preview_frames = previews
                 st.session_state.survey_stats = stats
                 st.session_state.annotated_video_path = out_vid_path
-                st.success(f"🎉 Pemrosesan selesai untuk {road_name}! Total panjang jalan terdeteksi: {stats.get('total_length_m', 0):.1f} meter ({len(segs)} segmen).")
+                st.success(f"🎉 Pemrosesan selesai untuk {exec_road_name}! Total panjang jalan terdeteksi: {stats.get('total_length_m', 0):.1f} meter ({len(segs)} segmen).")
         except Exception as e:
             st.error(f"❌ Terjadi kesalahan saat memproses video: {e}")
             logger.exception("Error process_video_survey")
@@ -391,35 +406,74 @@ tab_proses, tab_hasil, tab_vis, tab_peta, tab_koreksi, tab_export = st.tabs([
 # TAB 1: VIDEO INFERENSI & PREVIEW FRAME
 # ------------------------------------------------------------------------------
 with tab_proses:
-    st.subheader(f"🎬 Video Hasil Inferensi Model - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
+    curr_road = st.session_state.road_info.get("road_name", "").strip()
+    if curr_road:
+        st.subheader(f"🎬 Video Hasil Inferensi Model - {curr_road}")
+    else:
+        st.subheader("🎬 Video Hasil Inferensi Model")
 
     video_path = st.session_state.annotated_video_path
     if video_path and os.path.exists(video_path):
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        abs_video_path = os.path.abspath(video_path)
+
         col_v1, col_v2 = st.columns([3, 1])
         with col_v1:
             st.markdown('<div class="video-card">', unsafe_allow_html=True)
-            st.video(video_path)
+            # Tampilkan langsung di browser jika ukuran video wajar (<= 200MB)
+            if file_size_mb <= 200:
+                try:
+                    st.video(video_path)
+                except Exception as ex_vid:
+                    st.warning(f"Browser tidak dapat membuffer video ke memori ({ex_vid}). Gunakan tombol pemutar media lokal di sebelah kanan.")
+            else:
+                st.info(
+                    f"🎬 **Video Hasil Inferensi Siap Disimpan di Disk Lokal:**\n\n"
+                    f"`{os.path.basename(abs_video_path)}` (**{file_size_mb:.1f} MB**)\n\n"
+                    "Karena aplikasi berjalan secara **offline di perangkat lokal**, video berukuran besar tidak perlu "
+                    "dipaksa dimuat ke memori browser yang dapat memicu error RAM (*MemoryError*). Silakan gunakan tombol di panel "
+                    "kanan untuk memutar langsung menggunakan pemutar media lokal (VLC / Windows Media Player) secara instan!"
+                )
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col_v2:
-            st.markdown("#### 📥 Unduh Video Inferensi")
-            st.markdown(
-                "Video lengkap hasil deteksi komputer dengan anotasi bounding box kerusakan jalan, "
-                "kategori SDI, pelacakan ID objek, dan teks HUD posisi STA."
-            )
-            with open(video_path, "rb") as vf:
-                video_bytes = vf.read()
+            st.markdown("#### ⚡ Akses & Pemutar Video Lokal")
+            st.caption(f"📁 **Path:** `{abs_video_path}`\n\n📦 **Ukuran File:** {file_size_mb:.1f} MB")
 
-            st.download_button(
-                label="📥 Unduh Video MP4 (.mp4)",
-                data=video_bytes,
-                file_name=f"inferensi_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
-                mime="video/mp4",
-                use_container_width=True
-            )
-            st.caption("Format H.264 MP4 kompatibel dengan semua media player.")
+            # Tombol 1: Buka & Putar Langsung di Media Player Lokal
+            if st.button("▶️ Putar di Media Player Lokal", type="primary", use_container_width=True):
+                try:
+                    os.startfile(abs_video_path)
+                    st.toast("Membuka video di pemutar media lokal...", icon="🎬")
+                except Exception as ex_open:
+                    st.error(f"Gagal membuka pemutar media: {ex_open}")
+
+            # Tombol 2: Buka Folder di Windows Explorer
+            if st.button("📂 Buka Lokasi di File Explorer", use_container_width=True):
+                try:
+                    subprocess.Popen(f'explorer /select,"{abs_video_path}"')
+                    st.toast("Membuka Windows File Explorer...", icon="📂")
+                except Exception as ex_exp:
+                    st.error(f"Gagal membuka explorer: {ex_exp}")
 
             st.markdown("---")
+            # Tombol unduh browser hanya jika ukuran wajar (< 150MB) untuk mencegah MemoryError dari vf.read()
+            if file_size_mb <= 150:
+                try:
+                    with open(video_path, "rb") as vf:
+                        video_bytes = vf.read()
+                    st.download_button(
+                        label="📥 Salin / Unduh MP4 (.mp4)",
+                        data=video_bytes,
+                        file_name=f"inferensi_sdi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
+                        mime="video/mp4",
+                        use_container_width=True
+                    )
+                except Exception:
+                    st.success("✅ File tersimpan permanen di folder `output_survei/`.")
+            else:
+                st.success("✅ File tersimpan permanen di folder `output_survei/`.")
+
             st.metric("Total Segmen", f"{len(st.session_state.segments)} segmen")
             st.metric("Panjang Terdeteksi", f"{st.session_state.survey_stats.get('total_length_m', 0):.1f} m")
     else:
@@ -427,7 +481,14 @@ with tab_proses:
 
     st.markdown("---")
 
-    st.markdown("#### 🔍 Status Model AI & Segmentasi")
+    # Status Perangkat Komputasi Hardware
+    _, dev_info = get_optimal_device()
+    st.markdown("#### ⚡ Status Komputasi Hardware & Model AI")
+    if dev_info.get("type") == "GPU":
+        st.success(f"🚀 **Akselerasi GPU Aktif:** {dev_info.get('desc')} • cuDNN Benchmark & TF32 Diaktifkan (Akselerasi Maksimal)")
+        st.caption("💡 *Catatan Pemantauan GPU di Windows Task Manager:* Inferensi model AI (Deep Learning) berjalan di engine **Compute_0** / **CUDA**. Pada tab Performance Task Manager, klik drop-down grafis GPU dan pilih **Cuda** / **Compute_0** untuk memantau beban komputasi GPU yang sesungguhnya (bukan engine 3D).")
+    else:
+        st.info(f"⚙️ **Komputasi CPU:** {dev_info.get('desc')}")
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.info("⚡ **Cracks Seg:** `cracks/weights/best.pt` (<1mm, 1-3mm, >3mm)")
@@ -461,7 +522,11 @@ with tab_proses:
 # TAB 2: TABEL HASIL SDI (UTAMA) - 100% BEBAS DYNAMIC CHUNK ERROR
 # ------------------------------------------------------------------------------
 with tab_hasil:
-    st.subheader(f"Tabel Rekapitulasi Kondisi Jalan - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
+    curr_road = st.session_state.road_info.get("road_name", "").strip()
+    if curr_road:
+        st.subheader(f"Tabel Rekapitulasi Kondisi Jalan - {curr_road}")
+    else:
+        st.subheader("Tabel Rekapitulasi Kondisi Jalan")
 
     segments = st.session_state.segments
     if not segments:
@@ -532,7 +597,11 @@ with tab_hasil:
 # TAB 3: VISUALISASI & KPI
 # ------------------------------------------------------------------------------
 with tab_vis:
-    st.subheader(f"Ringkasan KPI & Analisis Kondisi - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
+    curr_road = st.session_state.road_info.get("road_name", "").strip()
+    if curr_road:
+        st.subheader(f"Ringkasan KPI & Analisis Kondisi - {curr_road}")
+    else:
+        st.subheader("Ringkasan KPI & Analisis Kondisi")
 
     segments = st.session_state.segments
     if not segments:
@@ -611,7 +680,7 @@ with tab_vis:
                 "Rusak Berat": "#E74C3C"
             },
             hover_data=["STA Start", "STA End", "Panjang", "Perkerasan"],
-            title=f"Distribusi Nilai SDI per Segmen - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}"
+            title=f"Distribusi Nilai SDI per Segmen - {curr_road}" if curr_road else "Distribusi Nilai SDI per Segmen"
         )
         fig_bar.add_hline(y=50, line_dash="dash", line_color="#F1C40F", annotation_text="Batas Sedang (50)")
         fig_bar.add_hline(y=100, line_dash="dash", line_color="#E67E22", annotation_text="Batas Rusak Ringan (100)")
@@ -664,7 +733,11 @@ with tab_vis:
 # TAB 4: PETA SPASIAL KONDISI JALAN
 # ------------------------------------------------------------------------------
 with tab_peta:
-    st.subheader(f"Peta Spasial Segmen - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
+    curr_road = st.session_state.road_info.get("road_name", "").strip()
+    if curr_road:
+        st.subheader(f"Peta Spasial Segmen - {curr_road}")
+    else:
+        st.subheader("Peta Spasial Segmen")
 
     segments = st.session_state.segments
     if not segments:
@@ -829,7 +902,11 @@ with tab_koreksi:
 # TAB 6: EKSPOR LAPORAN
 # ------------------------------------------------------------------------------
 with tab_export:
-    st.subheader(f"Ekspor Data & Laporan Hasil Survei - {st.session_state.road_info.get('road_name', 'Ruas Jalan')}")
+    curr_road = st.session_state.road_info.get("road_name", "").strip()
+    if curr_road:
+        st.subheader(f"Ekspor Data & Laporan Hasil Survei - {curr_road}")
+    else:
+        st.subheader("Ekspor Data & Laporan Hasil Survei")
 
     segments = st.session_state.segments
     if not segments:
@@ -873,16 +950,27 @@ with tab_export:
             )
 
         with col_ex4:
-            if st.session_state.annotated_video_path and os.path.exists(st.session_state.annotated_video_path):
-                with open(st.session_state.annotated_video_path, "rb") as vf:
-                    vid_dl_bytes = vf.read()
-                st.download_button(
-                    label="🎬 Unduh Video (.mp4)",
-                    data=vid_dl_bytes,
-                    file_name=f"video_inferensi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
-                    mime="video/mp4",
-                    use_container_width=True
-                )
+            vid_p = st.session_state.annotated_video_path
+            if vid_p and os.path.exists(vid_p):
+                sz_mb = os.path.getsize(vid_p) / (1024 * 1024)
+                abs_vid_p = os.path.abspath(vid_p)
+                if sz_mb <= 150:
+                    try:
+                        with open(vid_p, "rb") as vf:
+                            vid_dl_bytes = vf.read()
+                        st.download_button(
+                            label="🎬 Unduh Video (.mp4)",
+                            data=vid_dl_bytes,
+                            file_name=f"video_inferensi_{st.session_state.road_info.get('road_name', 'jalan')}.mp4",
+                            mime="video/mp4",
+                            use_container_width=True
+                        )
+                    except Exception:
+                        if st.button("📂 Buka Video di Explorer", use_container_width=True):
+                            subprocess.Popen(f'explorer /select,"{abs_vid_p}"')
+                else:
+                    if st.button("📂 Buka Video di Explorer", use_container_width=True):
+                        subprocess.Popen(f'explorer /select,"{abs_vid_p}"')
             else:
                 st.button("🎬 Unduh Video (.mp4)", disabled=True, use_container_width=True)
 

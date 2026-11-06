@@ -23,7 +23,7 @@ models:
     confidence_threshold: 0.25
     iou_threshold: 0.45
     imgsz: 640
-    device: "cpu"
+    device: "auto"
 
   # Model Klasifikasi Jenis Perkerasan
   perkerasan_clf:
@@ -31,12 +31,13 @@ models:
     fallback_path: "perkerasan_clf_models/weights/yolo26n.pt"
     confidence_threshold: 0.30
     imgsz: 320
-    device: "cpu"
+    device: "auto"
 
   # Model Estimasi STA / GPS
   gps_sta:
     model_path: "gps_sta_model/weights/yolo26n.pt"
     default_speed_kmh: 30.0
+    device: "auto"
 
 # ------------------------------------------------------------------------------
 # 2. MAPPING KELAS MODEL KE KATEGORI SDI PKRMS

@@ -6,6 +6,7 @@ import os
 import logging
 from typing import Dict, Any, Optional
 import numpy as np
+from core.device import get_optimal_device
 
 try:
     from ultralytics import YOLO
@@ -26,12 +27,12 @@ class PavementClassifier:
         model_path: Optional[str] = None,
         weights_path: Optional[str] = None,
         imgsz: int = 320,
-        device: str = "cpu",
+        device: str = "auto",
         class_mapping: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         self.imgsz = imgsz
-        self.device = device
+        self.device, self.device_info = get_optimal_device(device)
 
         # Mapping label internal model ke label tampilan PKRMS
         self.class_mapping = class_mapping or {
