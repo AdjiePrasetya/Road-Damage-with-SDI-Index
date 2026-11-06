@@ -217,11 +217,28 @@ st.markdown(
 with st.sidebar:
     st.header("⚙️ Pengaturan Survei")
 
-    uploaded_video = st.file_uploader("📹 Upload Video Survei (MP4 / MOV / AVI)", type=["mp4", "mov", "avi"])
+    uploaded_video = st.file_uploader(
+        "📹 Upload Video Survei (MP4 / MOV / AVI)",
+        type=["mp4", "mov", "avi"],
+        help="Bebas ukuran file (batas upload telah dinaikkan hingga 100 GB)"
+    )
+
+    local_video_path = st.text_input(
+        "📁 Atau Masukkan Path Video Lokal (Opsional)",
+        value="",
+        placeholder=r"Misal: D:\Project\video_survei.mov",
+        help="Jika ukuran file video sangat masif, Anda bisa langsung memasukkan path file lokal di komputer agar proses instan tanpa waktu tunggu upload browser."
+    )
 
     # EKSTRAKSI OTOMATIS NAMA JALAN DARI FILE VIDEO
+    active_video_name = None
     if uploaded_video is not None:
-        raw_name = os.path.splitext(uploaded_video.name)[0]
+        active_video_name = uploaded_video.name
+    elif local_video_path and os.path.exists(local_video_path):
+        active_video_name = os.path.basename(local_video_path)
+
+    if active_video_name:
+        raw_name = os.path.splitext(active_video_name)[0]
         clean_name = raw_name.replace("_", " ").replace("-", " ").strip().title()
         st.session_state.detected_road_name = clean_name
 
@@ -248,6 +265,8 @@ with st.sidebar:
     st.markdown("""
     <div class="auto-badge">
         <strong>⚡ Otomasi Penuh (Model AI Deep Learning):</strong><br>
+        • Bebas batas ukuran upload video (kuota hingga 100 GB).<br>
+        • Opsi input path lokal langsung tanpa waktu upload.<br>
         • Nama ruas jalan otomatis dari nama file video.<br>
         • Model <code>cracks/</code>: deteksi luas & lebar retak otomatis.<br>
         • Model <code>potholes/</code>: deteksi & hitung lubang/km otomatis.<br>
@@ -289,15 +308,32 @@ if demo_btn:
         st.success(f"✅ Mode Demo dimuat untuk {road_name}! Video inferensi siap ditonton dan diunduh.")
 
 if process_btn:
-    if uploaded_video is None:
-        st.error("⚠️ Silakan upload file video survei terlebih dahulu atau klik tombol 'Jalankan Demo'.")
-    else:
-        damage_det, pave_clf, sta_est = load_models()
+    video_source_path = None
+    is_temp_file = False
+    display_name = ""
 
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        tfile.write(uploaded_video.read())
-        temp_video_path = tfile.name
-        tfile.close()
+    if uploaded_video is not None:
+        display_name = uploaded_video.name
+        suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
+        with st.spinner(f"Menyiapkan video '{uploaded_video.name}' ke ruang kerja (streaming hemat RAM)..."):
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            while True:
+                chunk = uploaded_video.read(16 * 1024 * 1024)  # 16 MB per chunk
+                if not chunk:
+                    break
+                tfile.write(chunk)
+            tfile.close()
+        video_source_path = tfile.name
+        is_temp_file = True
+    elif local_video_path and os.path.exists(local_video_path):
+        video_source_path = local_video_path
+        display_name = os.path.basename(local_video_path)
+        is_temp_file = False
+    else:
+        st.error("⚠️ Silakan upload file video survei, masukkan path file video lokal yang valid, atau klik tombol 'Jalankan Demo'.")
+
+    if video_source_path:
+        damage_det, pave_clf, sta_est = load_models()
 
         progress_bar = st.progress(0.0)
         status_text = st.empty()
@@ -307,9 +343,9 @@ if process_btn:
             status_text.text(msg)
 
         try:
-            with st.spinner(f"Menganalisis video '{uploaded_video.name}' dengan 3 Model Segmentasi Kerusakan & GPS..."):
+            with st.spinner(f"Menganalisis video '{display_name}' dengan 3 Model Segmentasi Kerusakan & GPS..."):
                 segs, previews, stats, out_vid_path = process_video_survey(
-                    video_path=temp_video_path,
+                    video_path=video_source_path,
                     damage_detector=damage_det,
                     pavement_classifier=pave_clf,
                     sta_estimator=sta_est,
@@ -329,8 +365,11 @@ if process_btn:
             st.error(f"❌ Terjadi kesalahan saat memproses video: {e}")
             logger.exception("Error process_video_survey")
         finally:
-            if os.path.exists(temp_video_path):
-                os.remove(temp_video_path)
+            if is_temp_file and video_source_path and os.path.exists(video_source_path):
+                try:
+                    os.remove(video_source_path)
+                except Exception:
+                    pass
             progress_bar.empty()
             status_text.empty()
 
