@@ -129,25 +129,54 @@ Semua konfigurasi berikut berada di `config.yaml` dan dapat disesuaikan tanpa me
 
 ---
 
-## 🚀 Cara Menjalankan Aplikasi
+## 🚀 Panduan Clone Repo & Instalasi Lokal (Auto-Detect GPU & CPU)
 
-### 1. Prasyarat Lingkungan
-Pastikan Python 3.10 atau 3.11 telah terpasang. Jalankan instalasi dependensi:
+Aplikasi ini didesain **100% otomatis mendeteksi hardware komputer lokal pengguna**:
+- **Jika komputer/laptop memiliki GPU NVIDIA (GeForce GTX/RTX, Quadro, Tesla):** Dashboard otomatis mendeteksi nama GPU, kapasitas VRAM, dan mengaktifkan akselerasi GPU (Tensor Cores TF32 & cuDNN) secara maksimal.
+- **Jika komputer berbasis Apple Silicon (Mac M1/M2/M3/M4):** Dashboard otomatis menggunakan akselerasi Metal (MPS).
+- **Jika komputer tanpa GPU (hanya CPU):** Dashboard otomatis menggunakan CPU multi-threading maksimal ke seluruh core prosesor tanpa ada error.
+
+### 1. Clone Repositori
+```bash
+git clone https://github.com/<username>/dashboard_sdi.git
+cd dashboard_sdi
+```
+
+### 2. Instalasi Dependensi
+
+#### Opsi A: Jika Laptop / PC Memiliki GPU NVIDIA (Direkomendasikan untuk Akselerasi Maksimal)
+Jalankan file script otomatis di Windows:
+```cmd
+install_gpu.bat
+```
+Atau jalankan manual lewat terminal:
+```bash
+# 1. Pasang PyTorch berkemampuan CUDA
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 2. Pasang dependensi dashboard lainnya
+pip install -r requirements.txt
+```
+
+#### Opsi B: Jika Komputer Hanya Menggunakan CPU (Tanpa GPU Dedicated)
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Menjalankan Unit Tests
+### 3. Menjalankan Unit Tests (Opsional)
 Uji validitas batas perhitungan rumus SDI dan segmentasi jalan:
 ```bash
 python -m unittest discover tests/ -v
 ```
 
-### 3. Menjalankan Dashboard Streamlit
+### 4. Menjalankan Dashboard Streamlit
 ```bash
 streamlit run app.py
 ```
 Akses dashboard di browser melalui `http://localhost:8501`.
+
+> 💡 **Deteksi Otomatis & Diagnosis GPU Terintegrasi:**
+> Jika pengguna memiliki GPU NVIDIA pada laptopnya tetapi keliru menginstal PyTorch versi CPU, Dashboard akan langsung mendeteksi keberadaan kartu grafis tersebut dan memunculkan petunjuk instalasi 1-baris langsung di antarmuka web untuk mengaktifkan GPU.
 
 ---
 

@@ -250,9 +250,9 @@ def convert_to_web_h264(input_path: str, output_path: str, target_fps: float = 3
     except Exception:
         pass
 
+    # 1. Coba NVENC jika GPU NVIDIA tersedia
     if has_nvenc and torch.cuda.is_available():
-        # GPU NVENC encoding super cepat (200+ FPS) dengan kompresi optimal
-        cmd = [
+        cmd_nvenc = [
             ffmpeg_bin, "-y",
             "-i", input_path,
             "-r", str(round(target_fps, 2)),
@@ -262,25 +262,30 @@ def convert_to_web_h264(input_path: str, output_path: str, target_fps: float = 3
             "-pix_fmt", "yuv420p",
             output_path
         ]
-    else:
-        # CPU libx264 encoding dengan multi-threading maksimal
-        cmd = [
-            ffmpeg_bin, "-y",
-            "-i", input_path,
-            "-r", str(round(target_fps, 2)),
-            "-c:v", "libx264",
-            "-preset", "faster",
-            "-crf", "26",
-            "-pix_fmt", "yuv420p",
-            "-threads", str(os.cpu_count() or 8),
-            output_path
-        ]
+        try:
+            subprocess.run(cmd_nvenc, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except Exception as e:
+            logger.warning(f"Gagal NVENC GPU encoding ({e}), otomatis fallback ke libx264 CPU.")
+
+    # 2. Fallback CPU libx264 encoding dengan multi-threading maksimal
+    cmd_cpu = [
+        ffmpeg_bin, "-y",
+        "-i", input_path,
+        "-r", str(round(target_fps, 2)),
+        "-c:v", "libx264",
+        "-preset", "faster",
+        "-crf", "26",
+        "-pix_fmt", "yuv420p",
+        "-threads", str(os.cpu_count() or 8),
+        output_path
+    ]
 
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd_cpu, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
     except Exception as e:
-        logger.warning(f"Gagal convert ffmpeg: {e}. Menggunakan file mentah.")
+        logger.warning(f"Gagal convert ffmpeg libx264: {e}. Menggunakan file mentah.")
         shutil.copy(input_path, output_path)
         return False
 

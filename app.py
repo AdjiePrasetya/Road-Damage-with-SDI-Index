@@ -216,6 +216,19 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# Cek & Deteksi Otomatis Hardware Komputasi (GPU / CPU)
+_, initial_dev_info = get_optimal_device()
+if initial_dev_info.get("torch_cuda_missing"):
+    hw_gpu_name = initial_dev_info.get("hardware_gpu_name", "NVIDIA GPU")
+    st.warning(
+        f"💡 **Hardware GPU Terdeteksi di Komputer Anda: `{hw_gpu_name}`**, "
+        "tetapi pustaka PyTorch yang aktif di lingkungan ini saat ini adalah versi CPU.\n\n"
+        "Agar dashboard otomatis menjalankan seluruh model AI menggunakan GPU Anda dengan akselerasi maksimal, "
+        "silakan jalankan perintah berikut di Terminal / Command Prompt:\n\n"
+        f"```bash\n{initial_dev_info.get('install_cuda_cmd')}\n```\n\n"
+        "Setelah instalasi selesai, refresh halaman ini (`F5`) dan dashboard akan langsung beralih ke GPU secara otomatis!"
+    )
+
 
 # ==============================================================================
 # SIDEBAR: PENGATURAN SURVEI RINGKAS & OTOMATIS
@@ -283,6 +296,26 @@ with st.sidebar:
         • Kalibrasi kamera & resolusi dihitung otomatis.
     </div>
     """, unsafe_allow_html=True)
+
+    # Indikator Komputasi Hardware di Sidebar
+    if initial_dev_info.get("type") == "GPU":
+        st.markdown(f"""
+        <div style="background-color: #E8F8F5; border: 1px solid #A3E4D7; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: #117A65;">
+            🚀 <strong>GPU Aktif:</strong> {initial_dev_info.get('name')} ({initial_dev_info.get('vram_gb', 0)} GB VRAM)
+        </div>
+        """, unsafe_allow_html=True)
+    elif initial_dev_info.get("torch_cuda_missing"):
+        st.markdown(f"""
+        <div style="background-color: #FEF9E7; border: 1px solid #F9E79F; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: #7D6608;">
+            ⚠️ <strong>GPU Terdeteksi:</strong> {initial_dev_info.get('hardware_gpu_name')}<br><small>Perlu setup PyTorch CUDA agar aktif</small>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style="background-color: #EBF5FB; border: 1px solid #AED6F1; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: #1B4F72;">
+            ⚙️ <strong>Mode CPU:</strong> {initial_dev_info.get('name')}
+        </div>
+        """, unsafe_allow_html=True)
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -487,6 +520,16 @@ with tab_proses:
     if dev_info.get("type") == "GPU":
         st.success(f"🚀 **Akselerasi GPU Aktif:** {dev_info.get('desc')} • cuDNN Benchmark & TF32 Diaktifkan (Akselerasi Maksimal)")
         st.caption("💡 *Catatan Pemantauan GPU di Windows Task Manager:* Inferensi model AI (Deep Learning) berjalan di engine **Compute_0** / **CUDA**. Pada tab Performance Task Manager, klik drop-down grafis GPU dan pilih **Cuda** / **Compute_0** untuk memantau beban komputasi GPU yang sesungguhnya (bukan engine 3D).")
+    elif dev_info.get("torch_cuda_missing"):
+        hw_name = dev_info.get("hardware_gpu_name", "NVIDIA GPU")
+        st.warning(
+            f"💡 **Hardware GPU Terdeteksi di Komputer Anda: `{hw_name}`**, "
+            "tetapi pustaka PyTorch yang aktif saat ini adalah versi CPU.\n\n"
+            "Untuk mengaktifkan akselerasi GPU otomatis di laptop Anda, jalankan perintah ini di Command Prompt / Terminal:\n\n"
+            f"```bash\n{dev_info.get('install_cuda_cmd')}\n```\n\n"
+            "Setelah itu restart dashboard (`streamlit run app.py`), dan dashboard akan langsung menggunakan GPU Anda 100%!"
+        )
+        st.info(f"⚙️ **Status Komputasi Saat Ini:** Berjalan pada {dev_info.get('desc')} (Semua core CPU aktif).")
     else:
         st.info(f"⚙️ **Komputasi CPU:** {dev_info.get('desc')}")
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)

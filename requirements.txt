@@ -1,3 +1,20 @@
+# ==============================================================================
+# DEPENDENSI DASHBOARD SDI (PKRMS)
+# ==============================================================================
+# PANDUAN PENGGUNAAN GPU (NVIDIA CUDA):
+# Jika laptop/PC Anda memiliki GPU NVIDIA (GeForce GTX / RTX / Quadro / Tesla),
+# sangat disarankan menginstal PyTorch berkemampuan CUDA terlebih dahulu:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# Sistem dashboard akan OTOMATIS mendeteksi GPU lokal Anda dan menjalankannya
+# dengan akselerasi maksimal (Tensor Cores TF32 & cuDNN).
+#
+# Jika dijalankan pada komputer tanpa GPU, sistem otomatis beralih ke CPU
+# dengan multi-threading maksimal ke seluruh core prosesor.
+# ==============================================================================
+
 # Core Dashboard & UI
 streamlit>=1.35.0
 altair>=5.0.0
@@ -21,4 +38,3 @@ openpyxl>=3.1.2
 xlsxwriter>=3.1.9
 PyYAML>=6.0.1
 pypdf>=4.0.0
-
