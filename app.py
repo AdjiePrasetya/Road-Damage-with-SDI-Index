@@ -149,10 +149,11 @@ st.markdown("""
 # ==============================================================================
 @st.cache_data
 def load_config():
-    cfg_path = "config.yaml"
-    if os.path.exists(cfg_path):
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    for cfg_path in [os.path.join(base_dir, "config.yaml"), "config.yaml"]:
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
     return {}
 
 CONFIG = load_config()
@@ -180,7 +181,8 @@ def load_models():
         class_mapping=CONFIG.get("class_mapping", {}).get("perkerasan", None)
     )
     sta_est = StaEstimator(
-        model_path=gps_cfg.get("model_path", "gps_sta_model/weights/yolo26n.pt"),
+        model_path=gps_cfg.get("model_path", "gps_sta_model/weights/best.pt"),
+        roi_path=gps_cfg.get("roi_path", "gps_sta_model/weights/roi.json"),
         default_speed_kmh=gps_cfg.get("default_speed_kmh", 30.0),
         device=gps_cfg.get("device", "auto")
     )
@@ -292,8 +294,8 @@ with st.sidebar:
         • Model <code>cracks/</code>: deteksi luas & lebar retak otomatis.<br>
         • Model <code>potholes/</code>: deteksi & hitung lubang/km otomatis.<br>
         • Model <code>rutting/</code>: prediksi kedalaman alur otomatis.<br>
-        • Model <code>gps_sta_model/</code>: hitung jarak & STA mandiri.<br>
-        • Kalibrasi kamera & resolusi dihitung otomatis.
+        • Model <code>gps_sta_model/weights/best.pt</code>: deteksi STA Awal &amp; STA Akhir jalan otomatis dari GPS.<br>
+        • Kalibrasi kamera &amp; resolusi dihitung otomatis.
     </div>
     """, unsafe_allow_html=True)
 
@@ -408,7 +410,13 @@ if process_btn:
                 st.session_state.preview_frames = previews
                 st.session_state.survey_stats = stats
                 st.session_state.annotated_video_path = out_vid_path
-                st.success(f"🎉 Pemrosesan selesai untuk {exec_road_name}! Total panjang jalan terdeteksi: {stats.get('total_length_m', 0):.1f} meter ({len(segs)} segmen).")
+                sta_s = stats.get("sta_start_m", segs[0].sta_start if segs else 0.0)
+                sta_e = stats.get("sta_end_m", segs[-1].sta_end if segs else 0.0)
+                st.success(
+                    f"🎉 Pemrosesan selesai untuk {exec_road_name}! "
+                    f"Rentang STA terdeteksi: **{sta_s:.0f} m s/d {sta_e:.0f} m** • "
+                    f"Total panjang jalan: **{stats.get('total_length_m', 0):.1f} meter** ({len(segs)} segmen)."
+                )
         except Exception as e:
             st.error(f"❌ Terjadi kesalahan saat memproses video: {e}")
             logger.exception("Error process_video_survey")
@@ -507,7 +515,11 @@ with tab_proses:
             else:
                 st.success("✅ File tersimpan permanen di folder `output_survei/`.")
 
-            st.metric("Total Segmen", f"{len(st.session_state.segments)} segmen")
+            segs_now = st.session_state.segments
+            sta_s_metric = st.session_state.survey_stats.get("sta_start_m", segs_now[0].sta_start if segs_now else 0.0)
+            sta_e_metric = st.session_state.survey_stats.get("sta_end_m", segs_now[-1].sta_end if segs_now else 0.0)
+            st.metric("Rentang STA (GPS)", f"{sta_s_metric:.0f} m – {sta_e_metric:.0f} m")
+            st.metric("Total Segmen", f"{len(segs_now)} segmen")
             st.metric("Panjang Terdeteksi", f"{st.session_state.survey_stats.get('total_length_m', 0):.1f} m")
     else:
         st.info("💡 Belum ada video yang diproses. Silakan upload video survei Anda di sidebar atau klik **'🧪 Jalankan Demo'** untuk mencoba.")
@@ -540,7 +552,7 @@ with tab_proses:
     with col_m3:
         st.info("📉 **Rutting Seg:** `rutting/weights/best.pt` (<1cm, 1-3cm, >3cm)")
     with col_m4:
-        st.info("🛣️ **Pavement & GPS:** `perkerasan_cls` + `gps_sta_model/`")
+        st.info("🛣️ **Pavement & GPS STA:** `perkerasan_cls` + `gps_sta_model/weights/best.pt`")
 
     if st.session_state.preview_frames:
         st.markdown("#### 🖼️ Pratinjau Tangkapan Frame Resolusi Penuh")
@@ -661,11 +673,13 @@ with tab_vis:
 
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         with kpi1:
+            sta_min_kpi = segments[0].sta_start
+            sta_max_kpi = segments[-1].sta_end
             st.markdown(f"""
             <div class="kpi-card">
-                <div class="kpi-title">Panjang Total Otomatis</div>
+                <div class="kpi-title">Panjang &amp; Rentang STA</div>
                 <div class="kpi-val">{total_length_m:.1f} m</div>
-                <div class="kpi-note">{total_length_m/1000:.2f} km • {len(segments)} segmen</div>
+                <div class="kpi-note">STA {sta_min_kpi:.0f}–{sta_max_kpi:.0f} m ({total_length_m/1000:.2f} km • {len(segments)} segmen)</div>
             </div>
             """, unsafe_allow_html=True)
         with kpi2:
@@ -788,13 +802,16 @@ with tab_peta:
     else:
         base_lat = -6.2088
         base_lon = 106.8456
+        origin_sta = segments[0].sta_start
 
         path_data = []
         for s in segments:
-            lat_start = base_lat + (s.sta_start * 0.000009)
-            lon_start = base_lon + (s.sta_start * 0.000009)
-            lat_end = base_lat + (s.sta_end * 0.000009)
-            lon_end = base_lon + (s.sta_end * 0.000009)
+            rel_start = s.sta_start - origin_sta
+            rel_end = s.sta_end - origin_sta
+            lat_start = base_lat + (rel_start * 0.000009)
+            lon_start = base_lon + (rel_start * 0.000009)
+            lat_end = base_lat + (rel_end * 0.000009)
+            lon_end = base_lon + (rel_end * 0.000009)
 
             color_rgb = {
                 "Baik": [46, 204, 113, 220],
@@ -813,9 +830,10 @@ with tab_peta:
                 "recommendation": s.recommendation
             })
 
+        map_total_len = sum(s.length_m for s in segments)
         view_state = pdk.ViewState(
-            latitude=base_lat + (total_length_m * 0.0000045),
-            longitude=base_lon + (total_length_m * 0.0000045),
+            latitude=base_lat + (map_total_len * 0.0000045),
+            longitude=base_lon + (map_total_len * 0.0000045),
             zoom=15,
             pitch=30
         )

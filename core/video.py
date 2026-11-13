@@ -352,6 +352,17 @@ def process_video_survey(
         except Exception:
             pass
 
+    # Pre-kalibrasi STA Awal & Akhir jalan menggunakan model gps_sta_model/weights/best.pt
+    if hasattr(sta_estimator, "precalibrate_from_video"):
+        try:
+            if progress_callback:
+                progress_callback(0.01, "Mendeteksi nilai STA Awal & Akhir jalan dengan gps_sta_model/weights/best.pt...")
+            sta_estimator.precalibrate_from_video(cap, fps=fps, total_frames=total_frames)
+        except Exception as e:
+            logger.warning(f"Gagal precalibrate STA: {e}")
+    elif hasattr(sta_estimator, "reset"):
+        sta_estimator.reset()
+
     frame_idx = 0
     is_calibrated = False
     calib_info = {}
@@ -363,6 +374,11 @@ def process_video_survey(
         ret, frame = cap.read()
         if not ret:
             break
+
+        # Akselerasi STA: Jalankan inferensi model digit STA pada resolusi asli sebelum downscale agar ROI layar GPS tajam
+        frame_for_sta = frame if (frame_idx % infer_step == 0) else None
+        sta_res = sta_estimator.predict(frame=frame_for_sta, frame_idx=frame_idx, fps=fps)
+        sta_m = sta_res["sta_m"]
 
         # Optimasi Kinerja GPU/CPU: Resize langsung di awal jika dimensi asli > 1280px
         # Menghilangkan beban redundansi penggambaran dan komputasi di CPU
@@ -377,11 +393,6 @@ def process_video_survey(
                     crack_area_factors=calib_info.get("crack_area_factors")
                 )
             is_calibrated = True
-
-        # Akselerasi STA: Hanya inferensi model visual pada keyframe, posisi kumulatif dihitung instan setiap frame
-        frame_for_sta = frame if (frame_idx % infer_step == 0) else None
-        sta_res = sta_estimator.predict(frame=frame_for_sta, frame_idx=frame_idx, fps=fps)
-        sta_m = sta_res["sta_m"]
 
         if frame_idx % infer_step == 0:
             active_pavement = pavement_classifier.predict(frame)
@@ -455,11 +466,18 @@ def process_video_survey(
     if not frame_records:
         return [], preview_frames, {"total_frames": total_frames, "processed_frames": 0}, None
 
-    # Segmentasi Ruas PKRMS
+    # Pemurnian global lintasan STA berdasarkan hasil pembacaan digit GPS dari seluruh frame
+    if hasattr(sta_estimator, "refine_frame_records"):
+        sta_estimator.refine_frame_records(frame_records, preview_frames=preview_frames, fps=fps)
+
+    detected_sta_start = float(frame_records[0].sta_m)
+    detected_sta_end = float(frame_records[-1].sta_m)
+
+    # Segmentasi Ruas PKRMS menggunakan STA Awal terdeteksi dari model GPS STA
     segments = create_segments_from_frames(
         frames=frame_records,
         road_name=road_name,
-        sta_start_m=0.0,
+        sta_start_m=detected_sta_start,
         base_segment_length_m=base_segment_length_m,
         min_segment_length_m=10.0,
         smoothing_window=5,
@@ -518,6 +536,10 @@ def process_video_survey(
         seg.total_crack_area_m2 = round(total_crack_area_m2, 3)
         seg.recommendation = full_rec
 
+    if segments:
+        detected_sta_start = float(segments[0].sta_start)
+        detected_sta_end = float(segments[-1].sta_end)
+
     total_len = sum(s.length_m for s in segments)
     stats = {
         "total_frames": total_frames,
@@ -525,6 +547,8 @@ def process_video_survey(
         "fps": round(fps, 1),
         "total_segments": len(segments),
         "total_length_m": round(total_len, 1),
+        "sta_start_m": round(detected_sta_start, 1),
+        "sta_end_m": round(detected_sta_end, 1),
         "auto_calibration": calib_info.get("summary", "Kalibrasi Otomatis Aktif"),
     }
 

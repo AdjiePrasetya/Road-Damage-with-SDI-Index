@@ -45,6 +45,34 @@ class RoadSegment:
     total_crack_area_m2: float = 0.0
     is_manual_override: bool = False
 
+    @property
+    def sta_start_m(self) -> float:
+        return self.sta_start
+
+    @sta_start_m.setter
+    def sta_start_m(self, val: float) -> None:
+        self.sta_start = float(val)
+
+    @property
+    def sta_end_m(self) -> float:
+        return self.sta_end
+
+    @sta_end_m.setter
+    def sta_end_m(self, val: float) -> None:
+        self.sta_end = float(val)
+
+    @property
+    def sta_start_str(self) -> str:
+        km = int(self.sta_start // 1000)
+        m = int(round(self.sta_start % 1000))
+        return f"STA {km}+{m:03d}"
+
+    @property
+    def sta_end_str(self) -> str:
+        km = int(self.sta_end // 1000)
+        m = int(round(self.sta_end % 1000))
+        return f"STA {km}+{m:03d}"
+
 
 def smooth_pavement_types(
     frames: List[FrameRecord],
@@ -98,7 +126,7 @@ def smooth_pavement_types(
 def create_segments_from_frames(
     frames: List[FrameRecord],
     road_name: str = "Ruas Jalan Survei",
-    sta_start_m: float = 0.0,
+    sta_start_m: Optional[float] = None,
     base_segment_length_m: float = 100.0,
     min_segment_length_m: float = 10.0,
     smoothing_window: int = 5,
@@ -106,7 +134,7 @@ def create_segments_from_frames(
 ) -> List[RoadSegment]:
     """
     Membagi ruas menjadi segmen-segmen jalan sesuai aturan PKRMS:
-    1. Blok dasar tiap base_segment_length_m (default 100m, misal 0-100, 100-200).
+    1. Blok dasar tiap base_segment_length_m (default 100m), dimulai dari STA awal jalan terdeteksi.
     2. Jika jenis perkerasan di dalam blok 100m berubah, blok dipotong tepat di STA perubahan.
     3. Segmen sangat pendek (< min_segment_length_m) digabung ke segmen tetangga & diberi flag.
     """
@@ -124,9 +152,11 @@ def create_segments_from_frames(
     min_sta = sorted_frames[0].sta_m
     max_sta = sorted_frames[-1].sta_m
 
-    # Jika user menentukan sta_start_m lebih kecil dari frame pertama, gunakan sta_start_m
-    overall_start = min(sta_start_m, min_sta)
+    # Gunakan min_sta hasil deteksi model jika sta_start_m tidak ditentukan secara eksplisit
+    overall_start = min_sta if sta_start_m is None else min(sta_start_m, min_sta)
     overall_end = max_sta
+    if overall_end <= overall_start:
+        overall_end = round(overall_start + max(1.0, float(len(sorted_frames))), 1)
 
     # Tentukan batas-batas blok dasar 100m
     block_start = overall_start

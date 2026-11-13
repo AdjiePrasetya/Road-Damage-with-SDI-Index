@@ -58,9 +58,16 @@ class RoadDamageDetector:
         }
 
         # Jalur default masing-masing model
-        p_cracks = cracks_model_path or os.path.join("road_damage_models", "cracks", "weights", "best.pt")
-        p_potholes = potholes_model_path or os.path.join("road_damage_models", "potholes", "weights", "best.pt")
-        p_rutting = rutting_model_path or os.path.join("road_damage_models", "rutting", "weights", "best.pt")
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p_cracks = cracks_model_path or os.path.join(base_dir, "road_damage_models", "cracks", "weights", "best.pt")
+        if not os.path.exists(p_cracks) and cracks_model_path:
+            p_cracks = os.path.join(base_dir, cracks_model_path)
+        p_potholes = potholes_model_path or os.path.join(base_dir, "road_damage_models", "potholes", "weights", "best.pt")
+        if not os.path.exists(p_potholes) and potholes_model_path:
+            p_potholes = os.path.join(base_dir, potholes_model_path)
+        p_rutting = rutting_model_path or os.path.join(base_dir, "road_damage_models", "rutting", "weights", "best.pt")
+        if not os.path.exists(p_rutting) and rutting_model_path:
+            p_rutting = os.path.join(base_dir, rutting_model_path)
 
         self.cracks_model = None
         self.potholes_model = None

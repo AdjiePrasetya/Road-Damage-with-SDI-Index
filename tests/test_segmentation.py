@@ -108,6 +108,44 @@ class TestSegmentation(unittest.TestCase):
         self.assertEqual(corrected[0].flag, "Koreksi Manual")
         self.assertTrue(corrected[0].is_manual_override)
 
+    def test_non_zero_sta_start_and_end(self):
+        """
+        Skenario: Video survei dimulai dari STA 542 m dan berakhir di STA 842 m (bukan dari 0 m).
+        """
+        frames = [
+            FrameRecord(frame_idx=i, sta_m=float(542 + i * 20), pavement_type="Hotmix", pavement_conf=0.95)
+            for i in range(16)  # 542 m s/d 842 m
+        ]
+        segments = create_segments_from_frames(
+            frames=frames,
+            road_name="Jl Anjungan",
+            sta_start_m=None,
+            base_segment_length_m=100.0,
+            min_segment_length_m=10.0,
+            smoothing_window=1,
+            min_run_length=1
+        )
+        self.assertEqual(len(segments), 3)
+        self.assertEqual(segments[0].sta_start, 542.0)
+        self.assertEqual(segments[0].sta_end, 642.0)
+        self.assertEqual(segments[-1].sta_end, 842.0)
+
+    def test_sta_estimator_digit_refinement(self):
+        """
+        Menguji pemurnian lintasan STA dari pembacaan digit GPS (termasuk koreksi skala x10).
+        """
+        from models.sta_estimator import StaEstimator
+        times = [0.0, 3.33, 6.67, 10.0, 13.33]
+        raw_vals = [542.0, 575.0, 61.0, 642.0, 676.0]  # 61.0 adalah salah baca kehilangan 1 digit nol (seharusnya 610.0)
+        cleaned_sta, anchor_t, anchor_v, speed = StaEstimator.refine_sta_readings(
+            times=times,
+            raw_vals=raw_vals,
+            default_speed_mps=10.0
+        )
+        self.assertAlmostEqual(cleaned_sta[0], 542.0, delta=1.0)
+        self.assertAlmostEqual(cleaned_sta[-1], 676.0, delta=1.0)
+        self.assertAlmostEqual(cleaned_sta[2], 610.0, delta=5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

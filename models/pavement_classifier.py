@@ -44,11 +44,17 @@ class PavementClassifier:
         }
 
         target_path = model_path or weights_path
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = [
             target_path,
+            os.path.join(base_dir, target_path) if target_path else None,
+            os.path.join(base_dir, "perkerasan_clf_models", "runs", "perkerasan_cls", "weights", "best.pt"),
             os.path.join("perkerasan_clf_models", "runs", "perkerasan_cls", "weights", "best.pt"),
+            os.path.join(base_dir, "perkerasan_clf_models", "runs", "weights", "best.pt"),
             os.path.join("perkerasan_clf_models", "runs", "weights", "best.pt"),
+            os.path.join(base_dir, "perkerasan_clf_models", "weights", "best.pt"),
             os.path.join("perkerasan_clf_models", "weights", "best.pt"),
+            os.path.join(base_dir, "perkerasan_clf_models", "weights", "yolo26n.pt"),
             os.path.join("perkerasan_clf_models", "weights", "yolo26n.pt"),
         ]
 

@@ -33,9 +33,10 @@ models:
     imgsz: 320
     device: "auto"
 
-  # Model Estimasi STA / GPS
+  # Model Estimasi STA / GPS (Deteksi Digit STA Garmin GPS + ROI)
   gps_sta:
-    model_path: "gps_sta_model/weights/yolo26n.pt"
+    model_path: "gps_sta_model/weights/best.pt"
+    roi_path: "gps_sta_model/weights/roi.json"
     default_speed_kmh: 30.0
     device: "auto"
 
