@@ -160,8 +160,8 @@ CONFIG = load_config()
 
 
 @st.cache_resource
-def load_models():
-    logger.info("Memuat model deep learning & adapter...")
+def load_models(cache_version: str = "v2_digit_sta"):
+    logger.info(f"Memuat model deep learning & adapter ({cache_version})...")
     damage_cfg = CONFIG.get("models", {}).get("road_damage", {})
     pave_cfg = CONFIG.get("models", {}).get("perkerasan_clf", {})
     gps_cfg = CONFIG.get("models", {}).get("gps_sta", {})
@@ -384,6 +384,14 @@ if process_btn:
         st.session_state.road_info["road_name"] = exec_road_name
 
         damage_det, pave_clf, sta_est = load_models()
+        if not getattr(sta_est, "is_digit_model", False) or not hasattr(sta_est, "precalibrate_from_video"):
+            gps_cfg = CONFIG.get("models", {}).get("gps_sta", {})
+            sta_est = StaEstimator(
+                model_path=gps_cfg.get("model_path", "gps_sta_model/weights/best.pt"),
+                roi_path=gps_cfg.get("roi_path", "gps_sta_model/weights/roi.json"),
+                default_speed_kmh=gps_cfg.get("default_speed_kmh", 30.0),
+                device=gps_cfg.get("device", "auto")
+            )
 
         progress_bar = st.progress(0.0)
         status_text = st.empty()
